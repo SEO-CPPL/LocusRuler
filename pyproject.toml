@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "locus-ruler"
+version = "1.0.0"
+description = "Reference-guided survey of gene cluster presence and decay across bacterial genomes"
+authors = [{ name = "Jun-Yeong Seo" }]
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  "matplotlib>=3.8",
+  "ncbi-genome-download>=0.3",
+  "numpy>=1.26",
+  "openpyxl>=3.1",
+  "pandas>=2.0",
+  "scipy>=1.11",
+  "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+locus-ruler = "locus_ruler.run:main"
+locus-ruler-setup = "locus_ruler.setup:main"
+locus-ruler-heatmap = "locus_ruler.heatmap:main"
+locus-ruler-genes = "locus_ruler.reference_table:main"
+locus-ruler-make-config = "locus_ruler.make_config:main"
+locus-ruler-cassette = "locus_ruler.cassette_structure:main"
+locus-ruler-report = "locus_ruler.report:main"
+locus-ruler-wizard = "locus_ruler.wizard:main"
+locus-ruler-pfam = "locus_ruler.setup_pfam:main"
+
+[tool.setuptools]
+packages = ["locus_ruler"]

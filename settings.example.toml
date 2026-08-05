@@ -1,0 +1,105 @@
+[paths]
+# Paths are resolved relative to the directory where you run LocusRuler.
+# Two top-level directories: input/ for what you download once (genome
+# databases), output/ for what a run produces (tables, figures, the report).
+root = "."
+output_root = "output"
+work_dir = "output/_work"
+
+[[targets]]
+name = "example"
+db = "input/example/example.db"
+gff_dir = "input/example/gff"
+fna_dir = "input/example/genomes"
+faa = "input/example/combined_proteins.faa"
+
+[tools]
+tblastn = "tblastn"
+blastn = "blastn"
+blastp = "blastp"
+makeblastdb = "makeblastdb"
+hmmsearch = "hmmsearch"
+hmmfetch = "hmmfetch"
+
+[blast]
+min_identity = 50
+evalue = "1e-10"
+threads_per_job = 2
+
+# Everything the piece-assembly and gene-state layers read lives in this one
+# section. A locus config may override any of it with a [cluster_blast] block
+# of its own. Keys placed in any other section are not read.
+[cluster_blast]
+word_size = 7
+perc_identity = 50
+evalue = "1e-5"
+
+# -- piece assembly --
+min_piece_identity = 70
+min_genes = 2
+single_gene_min_identity_intra = 90
+single_gene_min_identity_inter = 75
+single_gene_min_identity_lenient = 40
+single_gene_min_coverage_lenient = 0.40
+min_piece_identity_lenient = 40
+min_gene_coverage_lenient = 0.40
+domain_rescue_enabled = true
+domain_rescue_min_identity = 40
+domain_rescue_min_gene_coverage = 0.15
+domain_rescue_max_gap_bp = -1
+single_gene_min_coverage = 0.70
+max_intra_piece_gap_bp = -1          # -1 = the reference cluster length
+duplication_min_identity = 90
+min_gene_coverage = 0.30
+min_coverage = 0.0
+
+# -- per-gene state --
+tblastn_intact_coverage = 0.70
+tblastn_intact_identity_intra = 75
+tblastn_intact_identity_inter = 60
+tblastn_min_identity = 30
+
+[domain_recovery]
+enabled = false
+pfam_domtblout = ""
+pfam_a_hmm = ""
+hmm_files = []
+
+# Pfam curates a gathering threshold for every family, and applies it itself to
+# decide whether a protein carries a domain. Keeping this true reproduces that
+# decision and makes the four E-values below unused. Turn it off only for a
+# hand-built profile, which has no such threshold to cut at.
+cut_ga = true
+evalue = "1e-5"
+report_evalue = "10"
+report_domain_evalue = "10"
+domain_cevalue = "1e-2"
+
+[ruler]
+bp_tolerance_pct = 15
+anchor_min_identity = 30
+
+# Final status guard: a DECAYED call with less locus-level coverage than this
+# is demoted to ABSENT. This prevents tiny conserved fragments from making a
+# whole locus look biologically decayed.
+min_decayed_coverage = 0.30
+
+[fragmentation]
+q_comp_threshold = 0.70
+q_overlap_threshold = 0.30
+edge_margin_bp = 500
+
+[content]
+flank_genes_shown = 2
+flank_label_min_identity = 0
+# Rescue windows scale with the reference locus: -1 means "derive", using the
+# fractions below. An absolute bp figure cannot mean the same thing at a 4 kb
+# and a 36 kb locus. Set a non-negative value to pin a window instead.
+adjacent_tblastn_rescue_ref_gap_bp = -1
+adjacent_tblastn_rescue_subject_gap_bp = -1
+adjacent_tblastn_rescue_ref_gap_fraction = 0.20
+adjacent_tblastn_rescue_subject_gap_fraction = 0.50
+
+[classification]
+# Optional CSV or JSON of family,keyword rules. Empty means each gene is its own family.
+rules_file = ""
