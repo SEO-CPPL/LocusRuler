@@ -295,7 +295,7 @@ CREATE TABLE IF NOT EXISTS proteins (
     start          INTEGER,
     end            INTEGER,
     strand         TEXT,
-    protein_len    INTEGER,
+    protein_len    INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_prot_genome  ON proteins (genome_acc);
 CREATE INDEX IF NOT EXISTS idx_prot_product ON proteins (product);
