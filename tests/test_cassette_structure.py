@@ -222,6 +222,35 @@ class CassetteStructureTests(unittest.TestCase):
         copy_signature = _signatures(_ordered_genes(fragments, pieces))[0]
         self.assertEqual(copy_signature, "one_family>one_family")
 
+    def test_two_intact_cds_under_one_alignment_are_one_split_gene(self):
+        """Both CDS complete, so both read INTACT, yet the anchor aligned once
+        across the pair: the annotation split a gene rather than duplicating it.
+        A real duplication aligns twice and disagrees on coverage or identity."""
+        pieces = _accepted_pieces(self.piece_rows, "locus")["genome"]
+
+        def halves(cov_a, pid_a, cov_b, pid_b):
+            return [
+                {
+                    "piece_idx": "0",
+                    "zone": "cluster",
+                    "gene_contig": "contig_a",
+                    "gene_start": str(start),
+                    "gene_end": str(start + 90),
+                    "locus_tag": f"half_{start}",
+                    "family": "one_family",
+                    "state": "INTACT",
+                    "tblastn_cov": cov,
+                    "tblastn_pid": pid,
+                }
+                for start, cov, pid in ((100, cov_a, pid_a), (210, cov_b, pid_b))
+            ]
+
+        shared = _signatures(_ordered_genes(halves("0.966", "77.6", "0.966", "77.6"), pieces))[0]
+        self.assertEqual(shared, "one_family")
+
+        distinct = _signatures(_ordered_genes(halves("0.98", "81.2", "0.72", "64.5"), pieces))[0]
+        self.assertEqual(distinct, "one_family>one_family")
+
 
 # The span is now resolved per locus, so the tests pin one explicitly.
 SPAN = 60_000

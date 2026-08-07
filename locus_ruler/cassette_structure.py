@@ -129,6 +129,24 @@ def _state_token(gene: dict) -> str:
     return f"{_family_token(gene)}:{state}"
 
 
+def _alignments(genes: list[dict]) -> set[tuple[str, str]]:
+    """Distinct anchor alignments behind a run of genes.
+
+    Two neighbours that carry the same coverage and identity are two CDS the
+    one alignment ran across -- a gene the annotation split, not a duplication.
+    Genuine copies each align on their own and disagree on at least one of the
+    two. This is what separates a split gene from a tandem pair when both CDS
+    are annotated complete and so both read as INTACT.
+    """
+    recorded = set()
+    for gene in genes:
+        coverage = str(gene.get("tblastn_cov") or "").strip()
+        identity = str(gene.get("tblastn_pid") or "").strip()
+        if coverage and identity:
+            recorded.add((coverage, identity))
+    return recorded
+
+
 def _signature_members(ordered_genes: list[dict]) -> list[dict]:
     """Collapse adjacent fragments of one family without hiding true copies."""
     members = [gene for gene in ordered_genes if gene["is_cassette_member"] == "Y"]
@@ -151,7 +169,9 @@ def _signature_members(ordered_genes: list[dict]) -> list[dict]:
                 gene for gene in run
                 if str(gene.get("state") or "").strip().upper() == "INTACT"
             ]
-            if len(intact) >= 2:
+            # one shared alignment means one gene the annotation split; anything
+            # else (distinct alignments, or none recorded) stays as copies
+            if len(intact) >= 2 and len(_alignments(intact)) != 1:
                 collapsed.extend(intact)
             else:
                 collapsed.append(max(
