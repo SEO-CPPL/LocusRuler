@@ -49,7 +49,7 @@ from flank_blast import (
     _product_to_flank_label,
 )
 from cohort_rescue import (
-    build_spans as build_cohort_spans,
+    build_spans_by_group as build_cohort_spans_by_genus,
     cohort_coverage,
     describe as describe_cohort_spans,
 )
@@ -387,14 +387,22 @@ def run_content(
         except (KeyError, ValueError, TypeError):
             aux_qlen[a.get("locus_tag", "")] = 1
 
-    # Consensus query window per aux anchor, built once from the whole run.
-    aux_cohort_spans = build_cohort_spans(
-        blast_hits, aux_qlen,
+    # Consensus query window per aux anchor, built once per genus. One window
+    # for a cohort spanning several genera would be set by whichever genus
+    # brought the most genomes, and the rest measured against an alignment their
+    # orthologue never had.
+    aux_genus_of = {
+        accession: (str(meta.get("species") or "").strip().split() or [""])[0]
+        for accession, meta in genome_meta.items()
+    }
+    aux_cohort_spans = build_cohort_spans_by_genus(
+        blast_hits, aux_qlen, aux_genus_of,
         min_coverage=aux_lenient_cov,
         min_identity=aux_lenient_id,
     ) if aux_anchors else {}
-    for line in describe_cohort_spans(aux_cohort_spans, aux_qlen):
-        print(f"[content] cohort span - {line}")
+    for genus, spans in sorted(aux_cohort_spans.items()):
+        for line in describe_cohort_spans(spans, aux_qlen):
+            print(f"[content] cohort span - {genus or 'ungrouped'} - {line}")
 
     def _contig_lens_for(acc: str) -> dict[str, int]:
         if acc not in _contig_lens_cache:
@@ -1911,7 +1919,7 @@ def run_content(
                     # Aux hits beside a main piece use the inter-lineage single-gene floor.
                     near_min_pid = float(cbcfg.get("single_gene_min_identity_inter", 75))
                     near_min_cov = remote_min_cov
-                span = aux_cohort_spans.get(aux_lt)
+                span = aux_cohort_spans.get(target_genus, {}).get(aux_lt)
 
                 def _clears(cov_value: float, floor: float, hit: dict) -> bool:
                     """Ordinary coverage, or coverage of what the cohort aligns."""

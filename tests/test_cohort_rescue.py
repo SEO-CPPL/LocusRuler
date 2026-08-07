@@ -4,6 +4,7 @@ import unittest
 
 from locus_ruler.cohort_rescue import (
     build_spans,
+    build_spans_by_group,
     cohort_coverage,
     consensus_span,
     describe,
@@ -115,6 +116,55 @@ class WhyPositionIsStillRequiredTests(unittest.TestCase):
             cohort_coverage(paralog, span), 0.40,
             "the domain alone does not discriminate -- position must",
         )
+
+
+class BuildSpansByGroupTests(unittest.TestCase):
+    """A cohort of several genera has no single answer to how much of an anchor
+    aligns, so each genus is measured against the way its own members align."""
+
+    TAG, QLEN = "ANCHOR", 323
+
+    def _mixed(self, n_majority, n_minority):
+        blast = {}
+        group_of = {}
+        for i in range(n_majority):
+            accession = f"GCF_maj{i:06d}.1"
+            blast[accession] = {self.TAG: [hit(1, 322)]}     # aligns end to end
+            group_of[accession] = "Majority"
+        for i in range(n_minority):
+            accession = f"GCF_min{i:06d}.1"
+            blast[accession] = {self.TAG: [hit(190, 320)]}   # one domain only
+            group_of[accession] = "Minority"
+        return blast, group_of
+
+    def test_each_genus_gets_the_window_its_own_members_align_over(self):
+        blast, group_of = self._mixed(200, 30)
+        spans = build_spans_by_group(blast, {self.TAG: self.QLEN}, group_of,
+                                     min_coverage=0.40, min_identity=40.0)
+        self.assertEqual(spans["Majority"][self.TAG][:2], (1, 322))
+        self.assertEqual(spans["Minority"][self.TAG][:2], (190, 320))
+
+    def test_the_majority_no_longer_sets_the_minority_window(self):
+        blast, group_of = self._mixed(200, 30)
+        pooled = build_spans(blast, {self.TAG: self.QLEN},
+                             min_coverage=0.40, min_identity=40.0)
+        grouped = build_spans_by_group(blast, {self.TAG: self.QLEN}, group_of,
+                                       min_coverage=0.40, min_identity=40.0)
+        self.assertEqual(pooled[self.TAG][:2], (1, 322))
+        self.assertNotEqual(grouped["Minority"][self.TAG][:2], pooled[self.TAG][:2])
+
+    def test_a_single_genus_run_is_unchanged(self):
+        blast, _ = self._mixed(30, 0)
+        group_of = {accession: "OnlyOne" for accession in blast}
+        pooled = build_spans(blast, {self.TAG: self.QLEN}, 0.40, 40.0)
+        grouped = build_spans_by_group(blast, {self.TAG: self.QLEN}, group_of, 0.40, 40.0)
+        self.assertEqual(grouped["OnlyOne"], pooled)
+
+    def test_a_genus_below_the_cohort_floor_gets_no_window(self):
+        blast, group_of = self._mixed(200, 3)
+        spans = build_spans_by_group(blast, {self.TAG: self.QLEN}, group_of,
+                                     min_coverage=0.40, min_identity=40.0)
+        self.assertEqual(spans["Minority"], {})
 
 
 class DescribeTests(unittest.TestCase):

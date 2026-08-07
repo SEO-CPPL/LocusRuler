@@ -85,6 +85,34 @@ def build_spans(
     return spans
 
 
+def build_spans_by_group(
+    blast_hits: dict[str, dict[str, list[dict]]],
+    qlens: dict[str, int],
+    group_of: dict[str, str],
+    min_coverage: float,
+    min_identity: float,
+    depth_fraction: float = DEPTH_FRACTION,
+    min_cohort: int = MIN_COHORT,
+) -> dict[str, dict[str, Span]]:
+    """Consensus window per anchor within each group of `group_of`.
+
+    A cohort drawn from several lineages has no single answer to how much of an
+    anchor aligns. Whichever lineage brings the most genomes decides the window,
+    and the others are then judged against a standard their orthologue was never
+    going to meet. Grouping the consensus keeps each lineage measured against
+    the way its own members align, and leaves a single-lineage run untouched.
+    """
+    grouped: dict[str, dict[str, dict[str, list[dict]]]] = {}
+    for accession, per_anchor in blast_hits.items():
+        group = group_of.get(accession) or ""
+        grouped.setdefault(group, {})[accession] = per_anchor
+    return {
+        group: build_spans(hits, qlens, min_coverage, min_identity,
+                           depth_fraction, min_cohort)
+        for group, hits in grouped.items()
+    }
+
+
 def cohort_coverage(hit: dict, span: Span) -> float:
     """Fraction of the consensus window this hit covers (0.0 when disjoint)."""
     qrange = _hit_qrange(hit)
