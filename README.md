@@ -18,13 +18,15 @@ Three properties distinguish it from a presence-or-absence homology search.
    python -m pip install -e .
    ```
 
-2. Start the wizard with a word from a gene of interest, or with a locus_tag.
+2. Start the wizard.
 
    ```bash
-   locus-ruler-wizard transporter
+   locus-ruler-wizard
    ```
 
-3. Follow the prompts. Select a reference genome, select the two genes marking the ends of the cluster, then run. Nothing needs to exist beforehand, as the wizard offers to create `settings.toml` and to download a genome dataset from NCBI where neither is present.
+3. Follow the prompts. Select a reference genome, search for a gene of interest, select the two genes marking the ends of the cluster, then run. Nothing needs to exist beforehand, as the wizard offers to create `settings.toml` and to download a genome dataset from NCBI where neither is present.
+
+   Everything the wizard asks for can also be given up front, so `locus-ruler-wizard transporter` starts from that search term, and `--target`, `--accession` and `--locus-id` skip their prompts. Where the gene you want is outside the listing, `<`, `>` and `+` widen it rather than sending you back to search again.
 
 INPUT
 
@@ -37,9 +39,9 @@ OUTPUT
 * `OUTPUTS.md` in the same directory, regenerated with every run, documenting every column and cell label produced by that run
 * `cluster_heatmap.png` and `cassette_structure.png`, the cluster and cassette figures
 
-## How is the pipeline run with a known target and flank genes?
+## How is the pipeline run with a known target and cluster?
 
-The same sequence, without prompts.
+The same sequence, without prompts. Run it from the directory holding `settings.toml`, which every command reads by default.
 
 ```bash
 python -m pip install -e .
@@ -48,18 +50,17 @@ cp settings.example.toml settings.toml
 locus-ruler-setup --taxon "Escherichia coli" \
     --outdir input/example --db-name example --add-target settings.toml
 
-locus-ruler-genes --settings settings.toml --target example \
-    --accession GCF_000000000.1 --out example_genes.csv
+locus-ruler-genes --accession GCF_000000000.1
 
 locus-ruler-make-config --locus-id my_locus --accession GCF_000000000.1 \
-    --target example --flank-l LEFT_TAG --flank-r RIGHT_TAG \
-    --table example_genes.csv --out my_locus.json
+    --first FIRST_TAG --last LAST_TAG
 
-locus-ruler --config my_locus.json --settings settings.toml \
-    --target example --cpu 8
+locus-ruler --config my_locus.json --cpu 8
 ```
 
-`locus-ruler-genes` exports every gene in the reference genome, which allows the two genes bracketing the cluster to be identified. `locus-ruler-make-config` converts those two locus_tags into the configuration file that `locus-ruler` reads.
+`locus-ruler-genes` exports every gene in the reference genome, which allows the cluster's own first and last gene to be identified. `locus-ruler-make-config` turns those two locus_tags into the configuration file that `locus-ruler` reads, looking up the flanking genes on either side for you.
+
+`--target` is only needed where `settings.toml` declares more than one; with several and no `--target`, each command asks. Where the flanking genes themselves are already known, `--flank-l` and `--flank-r` replace `--first`/`--last`, and `--table example_genes.csv` validates and orders them.
 
 ## How is a genome dataset built?
 
@@ -93,17 +94,45 @@ Two further columns cover a gene that has diverged past the point where BLAST wi
 
 The wizard presents all of these choices one gene at a time, with an explanation of each. The file may also be edited directly.
 
+## What are the commands?
+
+Nine, of which the wizard alone covers an ordinary run. Every command prints its full options under `--help`.
+
+| Command | Purpose |
+|---|---|
+| `locus-ruler-wizard` | Find a locus by browsing, configure it, run it. Start here |
+| `locus-ruler-setup` | Download and index a genome dataset from NCBI |
+| `locus-ruler-genes` | Export a reference genome's genes, to pick a cluster's ends |
+| `locus-ruler-make-config` | Turn those two locus_tags into a locus config |
+| `locus-ruler` | Run the pipeline for one config |
+| `locus-ruler-heatmap` | Re-render `cluster_heatmap.png` from a finished run |
+| `locus-ruler-cassette` | Re-run cassette structure discovery (step 6) alone |
+| `locus-ruler-report` | Rebuild `locus_report.xlsx` from a finished run |
+| `locus-ruler-pfam` | Download Pfam-A.hmm, for `[domain_recovery]` |
+
+Two conventions run through all of them. `--settings` defaults to `settings.toml` in the current directory, and `--target` defaults to the config's own reference target, or to the only declared one — with several and no `--target`, the command asks rather than guessing. So a locus that has already been run re-renders with nothing but its config:
+
+```bash
+locus-ruler-heatmap --config my_locus.json
+locus-ruler-cassette --config my_locus.json
+```
+
+The three that take longest have switches worth knowing. `locus-ruler --from N --to N` resumes or stops at a numbered step, so `--to 1` writes the anchor table and stops for editing before any BLAST runs; `--no-heatmap` and `--no-report` skip the presentation layer; `--genome ACC` restricts a run to one accession for debugging. `locus-ruler-setup --dry-run` reports how many genomes a taxon returns before downloading any of them.
+
 ## Where are results written?
 
 ```text
 output/<target>/<locus_id>/
   locus_report.xlsx
   cluster_heatmap.png
-  cassette_structure.png
+  cassette_structure.png            recurring structures
+  cassette_structure_singletons.png structures seen in one genome
   OUTPUTS.md
   tables/
   diagnostics/
 ```
+
+Either cassette figure pages into `_page1`, `_page2` and so on past six rows, rather than compressing every structure onto one canvas.
 
 `OUTPUTS.md` is regenerated with every run and documents every file, column and cell label that run produced. It, rather than this README, is the appropriate reference for interpreting a specific result.
 

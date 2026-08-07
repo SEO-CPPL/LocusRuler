@@ -43,9 +43,11 @@ from writers import (
 )
 
 try:
-    from .config_utils import get_target_cfg, load_locus_cfg, load_settings
+    from .config_utils import (get_target_cfg, load_locus_cfg, load_settings,
+                               resolve_target_name)
 except ImportError:
-    from config_utils import get_target_cfg, load_locus_cfg, load_settings
+    from config_utils import (get_target_cfg, load_locus_cfg, load_settings,
+                              resolve_target_name)
 
 
 MEMBER_ZONE = "cluster"
@@ -532,17 +534,26 @@ def _gene_length(gene: dict) -> int:
     )
 
 
+# Visual cap on any single gap, in gene-width units. A piece boundary or a
+# stray far-flung gene would otherwise stretch one row's real bp distance
+# across the whole shared axis and squeeze every other row to a sliver; past
+# this cap the gap is drawn as a dashed break instead of to scale.
+_MAX_GAP_UNITS = 1.5
+
+
 def _layout_row(
     genes: list[dict],
     display: dict,
-) -> tuple[list[tuple[dict, float, float]], float]:
+) -> tuple[list[tuple[dict, float, float, bool]], float]:
     scale_bp = display["scale_bp"]
-    laid_out: list[tuple[dict, float, float]] = []
+    laid_out: list[tuple[dict, float, float, bool]] = []
     x = 0.0
     previous = None
     for gene in genes:
+        break_before = False
         if previous is not None:
-            if gene["piece_order"] != previous["piece_order"]:
+            piece_changed = gene["piece_order"] != previous["piece_order"]
+            if piece_changed:
                 gap_bp = display["piece_gap_bp"]
             else:
                 prev_lo = min(
@@ -566,9 +577,11 @@ def _layout_row(
                     prev_lo - gene_hi - 1,
                     0,
                 )
-            x += gap_bp / scale_bp
+            raw_units = gap_bp / scale_bp
+            break_before = piece_changed or raw_units > _MAX_GAP_UNITS
+            x += min(raw_units, _MAX_GAP_UNITS)
         width = max(_gene_length(gene) / scale_bp, 0.14)
-        laid_out.append((gene, x, width))
+        laid_out.append((gene, x, width, break_before))
         x += width
         previous = gene
     return laid_out, x
@@ -617,7 +630,6 @@ def _plot_catalog(
     representative_genes: dict[str, list[dict]],
     out_path: Path,
     display: dict,
-    max_rows: int = 80,
 ) -> None:
     import matplotlib
 
@@ -630,7 +642,7 @@ def _plot_catalog(
         "Liberation Sans",
         "DejaVu Sans",
     ]
-    shown = catalog_rows[:max_rows]
+    shown = catalog_rows
     if not shown:
         return
     fig, ax = plt.subplots(figsize=(15, max(3.0, len(shown) * 0.82 + 1.5)))
@@ -642,17 +654,17 @@ def _plot_catalog(
         genes = _display_genes(representative_genes.get(structure_id, []))
         laid_out, row_width = _layout_row(genes, display)
         label_widths: dict[str, float] = {}
-        for gene, _, width in laid_out:
+        for gene, _, width, _ in laid_out:
             key = _style_for_gene(gene, display)["key"]
             label_widths[key] = max(label_widths.get(key, 0.0), width)
         labeled: set[str] = set()
         centers: dict[str, float] = {}
         zones: dict[str, str] = {}
-        last_piece = None
-        for gene, x, width in laid_out:
-            if last_piece is not None and gene["piece_order"] != last_piece:
+        prev_end = None
+        for gene, x, width, break_before in laid_out:
+            if break_before and prev_end is not None:
                 ax.plot(
-                    [x - display["piece_gap_bp"] / display["scale_bp"], x],
+                    [prev_end, x],
                     [y, y],
                     color="#78909C",
                     linewidth=1.0,
@@ -691,7 +703,7 @@ def _plot_catalog(
                 labeled.add(style["key"])
             centers[style["key"]] = x + width / 2
             zones[style["key"]] = str(gene.get("zone") or "")
-            last_piece = gene["piece_order"]
+            prev_end = x + width
         row_centers.append((centers, zones, y))
         max_x = max(max_x, row_width)
         species = str(catalog.get("representative_species") or "")
@@ -771,6 +783,40 @@ def _plot_catalog(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
+
+
+# Rows per catalog image. A handful of recurring architectures read fine
+# packed together; past this, each extra row buys less than it costs in
+# per-image legibility, so later rows spill onto numbered sibling pages.
+_ROWS_PER_IMAGE = 6
+
+
+def _plot_catalog_pages(
+    catalog_rows: list[dict],
+    representative_genes: dict[str, list[dict]],
+    base_path: Path,
+    display: dict,
+    rows_per_image: int = _ROWS_PER_IMAGE,
+    max_rows: int = 80,
+) -> list[Path]:
+    """Page a catalog at ``rows_per_image`` rows so no image is squeezed.
+
+    A single page keeps ``base_path``'s name; more than one page gets it
+    suffixed ``_page1``, ``_page2``, ...
+    """
+    rows = catalog_rows[:max_rows]
+    if not rows:
+        return []
+    chunks = [rows[i:i + rows_per_image] for i in range(0, len(rows), rows_per_image)]
+    written: list[Path] = []
+    for page, chunk in enumerate(chunks, start=1):
+        out_path = (
+            base_path if len(chunks) == 1
+            else base_path.with_name(f"{base_path.stem}_page{page}{base_path.suffix}")
+        )
+        _plot_catalog(chunk, representative_genes, out_path, display)
+        written.append(out_path)
+    return written
 
 
 def _write_matrix(
@@ -926,11 +972,7 @@ def run_cassette_structure(
     locus_cfg = load_locus_cfg(cfg_path)
     settings = load_settings(settings_path)
     locus_id = locus_cfg["locus_id"]
-    target_name = (
-        target_name
-        or locus_cfg.get("reference", {}).get("target")
-        or settings["targets"][0]["name"]
-    )
+    target_name = resolve_target_name(settings, target_name, locus_cfg)
     target_cfg = get_target_cfg(settings, target_name)
     display = _display_settings(locus_cfg)
     output_root = (
@@ -1106,16 +1148,23 @@ def run_cassette_structure(
     genes_path = out_dir / "cassette_genes.csv"
     catalog_path = out_dir / "structure_catalog.csv"
     figure_path = locus_out / "cassette_structure.png"
+    singleton_figure_path = locus_out / "cassette_structure_singletons.png"
     matrix_path = out_dir / "cassette_matrix.xlsx"
     manifest_path = diagnostics_dir(locus_out) / "cassette_run_manifest.json"
     _write_csv(summary_path, summary_rows)
     _write_csv(genes_path, gene_rows)
     _write_csv(catalog_path, catalog_rows)
-    _plot_catalog(
-        catalog_rows,
-        representatives,
-        figure_path,
-        display,
+    # A structure seen in only one genome is a one-off, not a recurring
+    # architecture -- keep it out of the main catalog plot so a single rare
+    # rearrangement can't dominate the page, and page it separately instead.
+    recurring_rows = [row for row in catalog_rows if row["n_genomes"] >= 2]
+    singleton_rows = [row for row in catalog_rows if row["n_genomes"] == 1]
+    figure_paths = _plot_catalog_pages(
+        recurring_rows, representatives, figure_path, display,
+        max_rows=max_plot_rows,
+    )
+    figure_paths += _plot_catalog_pages(
+        singleton_rows, representatives, singleton_figure_path, display,
         max_rows=max_plot_rows,
     )
     _write_matrix(
@@ -1138,7 +1187,7 @@ def run_cassette_structure(
             "summary": summary_path.name,
             "genes": genes_path.name,
             "catalog": catalog_path.name,
-            "figure": figure_path.name,
+            "figures": [path.name for path in figure_paths],
             "matrix": matrix_path.name,
         },
     }, indent=2), encoding="utf-8")
@@ -1164,13 +1213,14 @@ def run_cassette_structure(
     print(f"[cassette] summary -> {summary_path}")
     print(f"[cassette] genes   -> {genes_path}")
     print(f"[cassette] catalog -> {catalog_path}")
-    print(f"[cassette] figure  -> {figure_path}")
+    for path in figure_paths:
+        print(f"[cassette] figure  -> {path}")
     print(f"[cassette] matrix  -> {matrix_path}")
     return {
         "summary": summary_path,
         "genes": genes_path,
         "catalog": catalog_path,
-        "figure": figure_path,
+        "figures": figure_paths,
         "matrix": matrix_path,
         "manifest": manifest_path,
     }
@@ -1180,15 +1230,31 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Discover cassette structures from accepted LocusRuler pieces"
     )
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--settings", required=True)
-    parser.add_argument("--target")
-    parser.add_argument("--output-dir")
-    parser.add_argument("--max-plot-rows", type=int, default=80)
+    parser.add_argument("--config", required=True, help="Locus JSON config")
+    parser.add_argument("--settings", default="settings.toml",
+                        help="Path to settings.toml (default: settings.toml "
+                             "in the current directory)")
+    parser.add_argument("--target",
+                        help="Default: the config's reference target, or "
+                             "the only declared target; with several and no "
+                             "target given, you are asked")
+    parser.add_argument("--output-dir",
+                        help="Override output_root from settings (default: "
+                             "settings paths.output_root)")
+    parser.add_argument("--max-plot-rows", type=int, default=80,
+                        help="Cap on rows rendered per catalog (recurring, "
+                             "singleton), before paging at 6 rows/image "
+                             "(default: 80)")
     args = parser.parse_args()
+    settings_path = Path(args.settings)
+    if not settings_path.exists():
+        raise SystemExit(
+            f"ERROR: settings file not found: {settings_path}\n"
+            f"       Pass --settings <path>, or run from the directory "
+            f"holding settings.toml.")
     run_cassette_structure(
         Path(args.config),
-        Path(args.settings),
+        settings_path,
         target_name=args.target,
         output_root_override=Path(args.output_dir) if args.output_dir else None,
         max_plot_rows=args.max_plot_rows,

@@ -393,8 +393,9 @@ def _write_overview(workbook, locus_dir, locus_id, built, skipped, status_counts
         ("diagnostics/domain_recovery_diagnostics.csv",
          "Genes rescued by the optional Pfam/HMM layer; empty unless "
          "[domain_recovery] is enabled."),
-        ("cluster_heatmap.png / cassette_structure.png",
-         "The two figures, at the top level."),
+        ("cluster_heatmap.png / cassette_structure*.png",
+         "The figures, at the top level. Cassette structure is split into "
+         "recurring-vs-singleton catalogs, each paged at 6 rows/image."),
     ):
         row += 1
         worksheet.cell(row=row, column=1, value=name)

@@ -149,6 +149,39 @@ def get_target_cfg(settings: dict, name: str) -> dict:
              f"Available: {available}")
 
 
+def resolve_target_name(settings: dict, target_arg: str | None,
+                         locus_cfg: dict | None = None) -> str:
+    """--target if given, else the config's own reference target, else the
+    only declared target. With more than one and no explicit choice, ask
+    interactively; non-interactively, exit listing the choices rather than
+    silently picking one (and, for locus-ruler itself, silently scanning
+    every target's genomes).
+    """
+    if target_arg:
+        return target_arg
+    if locus_cfg is not None:
+        ref_target = locus_cfg.get("reference", {}).get("target")
+        if ref_target:
+            return ref_target
+    targets = settings.get("targets", [])
+    if not targets:
+        sys.exit("ERROR: no targets declared in settings.toml")
+    if len(targets) == 1:
+        return targets[0]["name"]
+    names = [t["name"] for t in targets]
+    if sys.stdin.isatty():
+        print("\nMultiple targets are declared in settings.toml:")
+        for index, name in enumerate(names, start=1):
+            print(f"  [{index}] {name}")
+        choice = input(f"Which one? [1-{len(names)}] ").strip()
+        try:
+            return names[int(choice) - 1]
+        except (ValueError, IndexError):
+            sys.exit(f"ERROR: invalid choice  (have: {', '.join(names)})")
+    sys.exit(f"ERROR: multiple targets declared, pick one with --target  "
+             f"(have: {', '.join(names)})")
+
+
 def missing_target_files(target: dict) -> list[tuple[str, str, str]]:
     """The pieces a target is missing, without exiting."""
     missing = []

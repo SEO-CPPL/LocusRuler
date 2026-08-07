@@ -13,10 +13,17 @@ PFAM_URL = "https://ftp.ebi.ac.uk/pub/databases/Pfam/current_release/Pfam-A.hmm.
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out-dir", default="input/pfam")
-    ap.add_argument("--url", default=PFAM_URL)
-    ap.add_argument("--force", action="store_true")
+    ap = argparse.ArgumentParser(
+        description="Download and index Pfam-A.hmm for [domain_recovery]")
+    ap.add_argument("--out-dir", default="input/pfam",
+                    help="Where to write Pfam-A.hmm and its hmmpress index "
+                         "(default: input/pfam)")
+    ap.add_argument("--url", default=PFAM_URL,
+                    help="Source URL for Pfam-A.hmm.gz (default: the "
+                         "current EBI release)")
+    ap.add_argument("--force", action="store_true",
+                    help="Re-download and re-index even if Pfam-A.hmm "
+                         "already exists in --out-dir")
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)

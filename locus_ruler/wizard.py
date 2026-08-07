@@ -21,6 +21,7 @@ from build_config import check_anchors_csv
 from config_utils import get_target_cfg, load_settings, missing_target_files
 from domain_recovery import pfam_tokens
 from discover import (
+    CONTEXT_GENES,
     find_genomes,
     paint,
     search_any_genome,
@@ -37,9 +38,23 @@ from discover import (
 BACK = object()
 _BACK_WORDS = ("b", "back")
 
+# Answers that mean "show me more genes", and how many each adds
+# (before, after). The gene the user wants is often just outside the
+# window the search hit produced.
+_WIDEN_STEP = 10
+_WIDEN = {"<": (_WIDEN_STEP, 0),
+          ">": (0, _WIDEN_STEP),
+          "+": (_WIDEN_STEP, _WIDEN_STEP)}
 
-def _ask(prompt: str, valid: range, default: int | None = None):
-    """Read a number, re-asking until it is one of the offered ones."""
+
+def _ask(prompt: str, valid: range, default: int | None = None,
+         widen: bool = False):
+    """Read a number, re-asking until it is one of the offered ones.
+
+    With `widen`, also accept <, > and + and hand them back as sentinels,
+    so a caller listing genes can show more of them rather than making the
+    user go back and search again.
+    """
     while True:
         try:
             raw = input(prompt).strip()
@@ -47,6 +62,8 @@ def _ask(prompt: str, valid: range, default: int | None = None):
             sys.exit("\nAborted (no input available).")
         if raw.lower() in _BACK_WORDS:
             return BACK
+        if widen and raw in _WIDEN:
+            return raw
         if not raw:
             if default is not None:
                 return default
@@ -54,7 +71,8 @@ def _ask(prompt: str, valid: range, default: int | None = None):
         if raw.isdigit() and int(raw) in valid:
             return int(raw)
         print(f"  Enter a number between {valid.start} and {valid.stop - 1}, "
-              "or b to go back.")
+              + ("<, > or + to list more genes, " if widen else "")
+              + "or b to go back.")
 
 
 def _confirm(prompt: str, default: bool = False) -> bool:
@@ -372,21 +390,37 @@ def _step_candidate(state: dict, ctx: dict):
 def _step_bounds(state: dict, ctx: dict):
     db = _db_for(ctx, state["target"])
     picked = state["candidate"]
-    genes = neighborhood(db, state["accession"], picked["contig"],
-                          picked["start"], picked["end"])
-    # The legend sits at the prompt, where it is still on screen.
-    print(f"\n{picked['contig']}, genes in order:\n")
-    for line in format_neighborhood(genes):
-        print(line)
+    pad_before = pad_after = CONTEXT_GENES
+
+    def _show():
+        genes = neighborhood(db, state["accession"], picked["contig"],
+                              picked["start"], picked["end"],
+                              pad_before=pad_before, pad_after=pad_after)
+        # The legend sits at the prompt, where it is still on screen.
+        print(f"\n{picked['contig']}, genes in order:\n")
+        for line in format_neighborhood(genes):
+            print(line)
+        return genes
+
+    genes = _show()
 
     # Ask for the locus itself, not for what surrounds it.
     while True:
         print(paint("\nWhich genes are the two ends of the cluster?", "bold"))
         print(f"(order does not matter; * = matched {state['term']!r}; "
               "b = back)")
-        a = _ask(f"  From [1-{len(genes)}] ", range(1, len(genes) + 1))
+        print(paint("(gene not listed? < shows more above, > more below, "
+                    "+ both)", "dim"))
+        a = _ask(f"  From [1-{len(genes)}] ", range(1, len(genes) + 1),
+                 widen=True)
         if a is BACK:
             return BACK
+        if a in _WIDEN:
+            before, after = _WIDEN[a]
+            pad_before += before
+            pad_after += after
+            genes = _show()
+            continue
         b = _ask(f"  To   [1-{len(genes)}] ", range(1, len(genes) + 1))
         if b is BACK:
             continue
@@ -445,8 +479,14 @@ def _default_outdir(ctx: dict, target: str, locus_id: str) -> Path:
 
 def _write_config(state: dict, ctx: dict) -> Path:
     args = ctx["args"]
-    locus_id = args.locus_id or (
-        f"{state['term']}_{state['accession'].replace('.', '_')}")
+    default_locus_id = f"{state['term']}_{state['accession'].replace('.', '_')}"
+    if args.locus_id or not sys.stdin.isatty():
+        locus_id = args.locus_id or default_locus_id
+    else:
+        # Left to itself this defaults to term_accession, which is unique but
+        # long -- a real barrier to re-running (--config <that>.json) by hand.
+        locus_id = _prompt(
+            f"\n  name for this locus [{default_locus_id}]: ") or default_locus_id
     outdir = (Path(args.outdir) if args.outdir
              else _default_outdir(ctx, state["target"], locus_id))
     out = outdir / f"{locus_id}.json"
@@ -950,7 +990,9 @@ def main(argv=None) -> int:
     ap.add_argument("--accession", default=None,
                     help="Reference genome, the one the cluster is defined in")
     ap.add_argument("--locus-id", default=None,
-                    help="Name for this locus (default: <find>_<accession>)")
+                    help="Name for this locus. Skips the interactive prompt "
+                         "for it; otherwise you are asked, with "
+                         "<find>_<accession> offered as the default")
     ap.add_argument("--outdir", default=None,
                     help="Where to write the config and anchor table. "
                          "Default: output_root/<target>/<locus_id>, the same "

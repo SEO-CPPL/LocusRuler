@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "locus-ruler"
-version = "1.0.0"
+version = "1.1.0"
 description = "Reference-guided survey of gene cluster presence and decay across bacterial genomes"
 authors = [{ name = "Jun-Yeong Seo" }]
 readme = "README.md"

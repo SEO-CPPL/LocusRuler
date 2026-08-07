@@ -17,13 +17,17 @@ asterisk marks an internal break, positioned where the alignment split.
 Rows group by status, then cluster within each group on the internal-break
 marker matrix, so visually identical rows sit together.
 
-Pass --target with --settings to resolve the metadata database from
-settings.toml. Without them the reference's own database is used, which is
-wrong whenever the scan target differs from the reference's dataset.
+Only --config is required. --settings defaults to settings.toml in the
+current directory, --target defaults to the config's reference target (or
+the only declared target; with several and no target given, you are asked),
+and --work-dir/--out default to the standard settings
+paths.work_dir/paths.output_root layout for that target and locus.
+Set --target explicitly whenever the scan target differs from the
+reference's own dataset -- otherwise the reference's database is used,
+which gives the wrong row labels.
 """
 
 import argparse
-import csv
 import json
 import sqlite3
 import sys
@@ -42,6 +46,7 @@ from heatmap_cluster import (
     informative_marker_positions as _informative_marker_positions,
     cluster_within_group as _cluster_within_group,
 )
+from config_utils import load_locus_cfg
 
 
 # ── Constants ──────────────────────────────────────────────────────
@@ -82,46 +87,6 @@ FLANK_STATE_TINT = {
     "MISSING": "#e41a1c",
     "":        "#ffffff",
 }
-
-
-# ── Settings & Config loader ──────────────────────────────────────────────────────
-def load_locus_cfg(path: Path) -> dict:
-    cfg = json.loads(path.read_text())
-    # Try to load anchors from CSV if it exists (allows easy user editing of family names/exceptions)
-    csv_path = path.with_name(path.stem + "_anchors.csv")
-    if csv_path.exists():
-        try:
-            with open(csv_path, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                csv_anchors = list(reader)
-
-            # Map by locus_tag.
-            tag_to_data = {
-                row["locus_tag"]: {
-                    k: v for k, v in row.items()
-                    if k not in (None, "") and v not in (None, "")
-                }
-                for row in csv_anchors if row.get("locus_tag")
-            }
-
-            # Update the anchors list in _auto
-            if "_auto" in cfg and "anchors" in cfg["_auto"]:
-                for a in cfg["_auto"]["anchors"]:
-                    lt = a.get("locus_tag")
-                    if lt in tag_to_data:
-                        d = tag_to_data[lt]
-                        a.update(d)
-                        a["exception"] = str(d.get("exception", "")).upper() == "TRUE"
-                existing = {a.get("locus_tag") for a in cfg["_auto"]["anchors"]}
-                for row in csv_anchors:
-                    if row.get("role") == "aux" and row.get("locus_tag") not in existing:
-                        a = {k: v for k, v in row.items()
-                             if k not in (None, "") and v not in (None, "")}
-                        a["exception"] = str(a.get("exception", "")).upper() == "TRUE"
-                        cfg["_auto"]["anchors"].append(a)
-        except Exception:
-            pass  # fall back to the JSON config if the CSV is malformed
-    return cfg
 
 
 # ── Reference gene layout ──────────────────────────────────────────────────────
@@ -837,20 +802,30 @@ def render(ruler_results: dict[str, dict],
 def main():
     ap = argparse.ArgumentParser(description=_DESCRIPTION,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--work-dir", required=True,
-                    help="LocusRuler work dir for a locus (contains ruler_results.json)")
     ap.add_argument("--config",   required=True, help="Locus JSON config")
-    ap.add_argument("--db",       default=None,
-                    help="(optional) SQLite DB for species/strain row labels. "
-                         "Explicit override; usually you want --target instead.")
+    ap.add_argument("--settings", default="settings.toml",
+                    help="Path to settings.toml (default: settings.toml in "
+                         "the current directory). Needed to resolve --target, "
+                         "the metadata DB, and the default --work-dir/--out.")
     ap.add_argument("--target",   default=None,
-                    help="(recommended) Target name in settings.toml - "
-                         "metadata DB is resolved from settings[targets][*].db. "
-                         "Use this when scanning a target different from the "
-                         "reference's dataset.")
-    ap.add_argument("--settings", default=None,
-                    help="Path to settings.toml (required if --target is set)")
-    ap.add_argument("--out",      required=True, help="Output PNG path")
+                    help="Target name in settings.toml. Default: the config's "
+                         "reference target, or the only declared target; "
+                         "with several and no target given, you are asked. "
+                         "Set this explicitly when scanning a target "
+                         "different from the reference's own dataset.")
+    ap.add_argument("--db",       default=None,
+                    help="(optional) SQLite DB for species/strain row labels, "
+                         "overriding the one resolved from --target")
+    ap.add_argument("--work-dir", default=None,
+                    help="LocusRuler work dir for this locus, containing "
+                         "ruler_results.json (default: settings paths.work_dir"
+                         "/<target>/<locus_id>)")
+    ap.add_argument("--out",      default=None,
+                    help="Output PNG path (default: settings paths.output_root"
+                         "/<target>/<locus_id>/cluster_heatmap.png)")
+    ap.add_argument("--output-dir", default=None,
+                    help="Override output_root from settings; only affects "
+                         "the default --out (ignored if --out is also given)")
     ap.add_argument("--include-unknown", action="store_true",
                     help="Plot UNKNOWN-status genomes too")
     ap.add_argument("--max-pieces", type=int, default=4,
@@ -861,37 +836,51 @@ def main():
                          "number) to disable.")
     args = ap.parse_args()
 
-    work_dir = Path(args.work_dir).resolve()
     cfg_path = Path(args.config).resolve()
-    out_path = Path(args.out).resolve()
+    locus_cfg = load_locus_cfg(cfg_path)
+    locus_id = locus_cfg.get("locus_id")
+
+    settings = None
+    settings_path = Path(args.settings)
+    needs_settings = not (args.work_dir and args.out and args.db)
+    if needs_settings or args.target:
+        if not settings_path.exists():
+            sys.exit(f"ERROR: settings file not found: {settings_path}\n"
+                      f"       Pass --settings <path>, or supply --work-dir, "
+                      f"--out and --db to skip it entirely.")
+        from config_utils import load_settings, get_target_cfg, resolve_target_name
+        settings = load_settings(settings_path)
+
+    target_name = args.target
+    if target_name is None and settings is not None:
+        target_name = resolve_target_name(settings, None, locus_cfg)
+
+    if args.work_dir:
+        work_dir = Path(args.work_dir).resolve()
+    else:
+        work_dir = Path(settings["paths"]["work_dir"]) / target_name / locus_id
+
+    if args.out:
+        out_path = Path(args.out).resolve()
+    else:
+        output_root = (
+            Path(args.output_dir) if args.output_dir
+            else Path(settings["paths"]["output_root"])
+        )
+        out_path = output_root / target_name / locus_id / "cluster_heatmap.png"
 
     rrjson = work_dir / "ruler_results.json"
     if not rrjson.exists():
-        sys.exit(f"ruler_results.json not found: {rrjson}")
+        sys.exit(f"ruler_results.json not found: {rrjson}\n"
+                  f"       Run locus-ruler for this config/target first.")
 
     with open(rrjson) as f:
         ruler_results = json.load(f)
-    locus_cfg = load_locus_cfg(cfg_path)
 
-    # Row-label DB, in order: --db, then --target with --settings, then the config.
+    # Row-label DB, in order: --db, then --target (resolved via settings), then the config.
     db_path = args.db
-    if not db_path and args.target:
-        if not args.settings:
-            sys.exit("--target requires --settings (to resolve DB path)")
-        try:
-            import tomllib
-        except ImportError:
-            import tomli as tomllib
-        with open(args.settings, "rb") as f:
-            settings = tomllib.load(f)
-        root = Path(settings.get("paths", {}).get("root", "."))
-        tgt = next((t for t in settings.get("targets", [])
-                    if t.get("name") == args.target), None)
-        if tgt is None:
-            avail = [t.get("name") for t in settings.get("targets", [])]
-            sys.exit(f"target '{args.target}' not in settings  (have: {avail})")
-        raw_db = Path(tgt["db"])
-        db_path = str(raw_db if raw_db.is_absolute() else root / raw_db)
+    if not db_path and target_name and settings is not None:
+        db_path = get_target_cfg(settings, target_name)["db"]
     if not db_path:
         db_path = (locus_cfg.get("_auto", {})
                             .get("built_from", {})

@@ -15,7 +15,7 @@ _PKG_DIR = Path(__file__).resolve().parent
 if str(_PKG_DIR) not in sys.path:
     sys.path.insert(0, str(_PKG_DIR))
 
-from config_utils import get_target_cfg, load_settings
+from config_utils import get_target_cfg, load_settings, resolve_target_name
 from gff import _find_gff, _open_gff, _parse_attrs
 
 
@@ -168,19 +168,33 @@ def _write_csv(rows: list[dict], out_path: Path, accession: str, target: str) ->
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Export a reference genome gene table to help choose flank_L/flank_R."
+        description="Export a reference genome gene table to help pick the "
+                    "cluster's first and last gene."
     )
-    ap.add_argument("--settings", required=True, help="Path to settings.toml")
-    ap.add_argument("--target", required=True, help="Target name in settings.toml")
+    ap.add_argument("--settings", default="settings.toml",
+                    help="Path to settings.toml (default: settings.toml in "
+                         "the current directory)")
+    ap.add_argument("--target", default=None,
+                    help="Target name in settings.toml. Default: the only "
+                         "declared target; with several and no target given, "
+                         "you are asked")
     ap.add_argument("--accession", required=True, help="Reference genome accession")
-    ap.add_argument("--out", required=True, help="Output CSV path")
+    ap.add_argument("--out", default=None,
+                    help="Output CSV path (default: <accession>_genes.csv)")
     ap.add_argument("--around", default=None, help="Only export genes around this locus_tag")
     ap.add_argument("--product", default=None, help="Only export windows around product/gene regex matches")
     ap.add_argument("--radius", type=int, default=20, help="Genes on each side for --around/--product")
     args = ap.parse_args()
 
-    settings = load_settings(Path(args.settings).resolve())
-    target_cfg = get_target_cfg(settings, args.target)
+    settings_path = Path(args.settings)
+    if not settings_path.exists():
+        sys.exit(f"ERROR: settings file not found: {settings_path}\n"
+                 f"       Pass --settings <path>, or run from the directory "
+                 f"holding settings.toml.")
+    settings = load_settings(settings_path.resolve())
+    target_name = resolve_target_name(settings, args.target)
+    target_cfg = get_target_cfg(settings, target_name)
+    out_path = Path(args.out) if args.out else Path(f"{args.accession}_genes.csv")
     meta = _genome_meta(target_cfg["db"], args.accession)
     gff_path = _find_gff(target_cfg["gff_dir"], args.accession)
     if not gff_path:
@@ -188,11 +202,11 @@ def main() -> None:
 
     rows = _parse_reference_gff(gff_path)
     selected = _select_rows(rows, args.around, args.product, args.radius)
-    _write_csv(selected, Path(args.out), args.accession, args.target)
+    _write_csv(selected, out_path, args.accession, target_name)
     print(f"[reference_table] accession: {args.accession}")
     print(f"[reference_table] organism : {meta.get('organism_name') or meta.get('species') or ''}")
     print(f"[reference_table] gff      : {gff_path}")
-    print(f"[reference_table] wrote    : {args.out} ({len(selected)} rows)")
+    print(f"[reference_table] wrote    : {out_path} ({len(selected)} rows)")
 
 
 if __name__ == "__main__":

@@ -71,14 +71,22 @@ def group(hits: list[dict], max_gap: int = DEFAULT_GROUP_GAP_BP) -> list[dict]:
 
 
 def neighborhood(db_path: Path, accession: str, contig: str,
-                  start: int, end: int, pad_genes: int = CONTEXT_GENES) -> list[dict]:
-    """Genes across a span, plus `pad_genes` on each side for context."""
+                  start: int, end: int, pad_genes: int = CONTEXT_GENES,
+                  pad_before: int | None = None,
+                  pad_after: int | None = None) -> list[dict]:
+    """Genes across a span, plus context on each side.
+
+    `pad_genes` sets both sides; `pad_before`/`pad_after` override one side
+    each, so a caller can widen only the direction it needs.
+    """
+    pad_before = pad_genes if pad_before is None else pad_before
+    pad_after = pad_genes if pad_after is None else pad_after
     con = sqlite3.connect(str(db_path))
     try:
         before = con.execute(
             "SELECT locus_tag, contig, start, end, strand, product FROM proteins "
             "WHERE genome_acc=? AND contig=? AND end < ? ORDER BY start DESC LIMIT ?",
-            (accession, contig, start, pad_genes)).fetchall()[::-1]
+            (accession, contig, start, pad_before)).fetchall()[::-1]
         inside = con.execute(
             "SELECT locus_tag, contig, start, end, strand, product FROM proteins "
             "WHERE genome_acc=? AND contig=? AND end >= ? AND start <= ? ORDER BY start",
@@ -86,7 +94,7 @@ def neighborhood(db_path: Path, accession: str, contig: str,
         after = con.execute(
             "SELECT locus_tag, contig, start, end, strand, product FROM proteins "
             "WHERE genome_acc=? AND contig=? AND start > ? ORDER BY start LIMIT ?",
-            (accession, contig, end, pad_genes)).fetchall()
+            (accession, contig, end, pad_after)).fetchall()
     finally:
         con.close()
 

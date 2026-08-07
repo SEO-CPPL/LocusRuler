@@ -12,7 +12,8 @@ _PKG_DIR = Path(__file__).resolve().parent
 if str(_PKG_DIR) not in sys.path:
     sys.path.insert(0, str(_PKG_DIR))
 
-from config_utils import load_settings, load_locus_cfg, save_locus_cfg, get_target_cfg
+from config_utils import (load_settings, load_locus_cfg, save_locus_cfg,
+                          get_target_cfg, resolve_target_name)
 
 
 # ── Step helpers ──────────────────────────────────────────────────────
@@ -231,10 +232,14 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument("--config",   required=True,
                     help="Path to locus JSON config (e.g. configs/example_cluster.json)")
-    ap.add_argument("--settings", required=True,
-                    help="Path to settings.toml")
+    ap.add_argument("--settings", default="settings.toml",
+                    help="Path to settings.toml (default: settings.toml in "
+                         "the current directory)")
     ap.add_argument("--target",
-                    help="Target name (overrides reference.target in config)")
+                    help="Target name (overrides reference.target in config). "
+                         "Default: the config's reference target, or the "
+                         "only declared target; with several and no target "
+                         "given, you are asked")
     ap.add_argument("--cpu",     type=int, default=4,
                     help="Parallel workers for BLAST jobs (default: 4)")
     ap.add_argument("--from",    dest="from_step", type=int, default=1,
@@ -270,7 +275,12 @@ def parse_args() -> argparse.Namespace:
 def main():
     args        = parse_args()
     cfg_path    = Path(args.config).resolve()
-    settings_p  = Path(args.settings).resolve()
+    settings_p  = Path(args.settings)
+    if not settings_p.exists():
+        sys.exit(f"ERROR: settings file not found: {settings_p}\n"
+                  f"       Pass --settings <path>, or run from the "
+                  f"directory holding settings.toml.")
+    settings_p  = settings_p.resolve()
     settings    = load_settings(settings_p)
 
     # Resolve paths
@@ -288,9 +298,7 @@ def main():
         locus_cfg = load_locus_cfg(cfg_path)
 
     locus_id   = locus_cfg["locus_id"]
-    target_name = (args.target
-                   or locus_cfg.get("reference", {}).get("target")
-                   or settings["targets"][0]["name"])
+    target_name = resolve_target_name(settings, args.target, locus_cfg)
     tgt_cfg    = get_target_cfg(settings, target_name)
 
     locus_work  = work_dir / target_name / locus_id
