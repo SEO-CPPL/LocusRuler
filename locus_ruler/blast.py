@@ -2,6 +2,7 @@
 """BLAST database construction and anchor searches."""
 
 import csv, gzip, json, os, re, sqlite3, subprocess, sys, tempfile
+from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -47,6 +48,54 @@ def _load_csv(path: Path) -> list[dict]:
         return []
     with open(path, newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
+
+
+class _HitsOnDisk(Mapping):
+    """Per-genome BLAST hits, read on demand rather than all at once."""
+
+    def __init__(self, accessions, loader, cache_size: int = 8):
+        self._accessions = list(accessions)
+        self._loader = loader
+        self._cache: dict = {}
+        self._order: list = []
+        self._cache_size = cache_size
+
+    def __getitem__(self, accession):
+        if accession not in self._cache:
+            if accession not in set(self._accessions):
+                raise KeyError(accession)
+            self._cache[accession] = self._loader(accession)
+            self._order.append(accession)
+            while len(self._order) > self._cache_size:
+                self._cache.pop(self._order.pop(0), None)
+        return self._cache[accession]
+
+    def __iter__(self):
+        return iter(self._accessions)
+
+    def __len__(self):
+        return len(self._accessions)
+
+    def __contains__(self, accession):
+        return accession in set(self._accessions)
+
+
+def anchor_hits_on_disk(work_dir: Path, locus_id: str, accessions, tags):
+    """Cached anchor tblastn results, loaded per genome."""
+    def load(accession):
+        return {tag: _load_csv(_hit_csv_path(work_dir, locus_id, accession, tag))
+                for tag in tags}
+    return _HitsOnDisk(accessions, load)
+
+
+def cluster_hits_on_disk(locus_dir: Path, accessions):
+    """Cached cluster blastn results, loaded per genome."""
+    cb_dir = Path(locus_dir) / "cluster_blast"
+    present = [a for a in accessions if (cb_dir / f"{a}.tsv").exists()]
+
+    def load(accession):
+        return _load_csv(cb_dir / f"{accession}.tsv")
+    return _HitsOnDisk(present, load)
 
 
 def _save_csv(rows: list[dict], path: Path):
@@ -205,14 +254,19 @@ def run_anchor_blast(locus_cfg: dict, settings: dict,
         role = a["role"]
         tmp = work_dir / locus_id / "query_fastas" / f"{tag}.faa"
         tmp.parent.mkdir(parents=True, exist_ok=True)
-        if not tmp.exists() or force:
-            # Extract this anchor's sequence from the combined anchors.faa
-            seq = _extract_one_seq(anchors_faa, tag)
-            if seq:
-                tmp.write_text(f">{tag}|{role}\n{seq}\n")
-            else:
-                print(f"  [WARN] no sequence for {tag} in {anchors_faa}")
-                continue
+        # Extract this anchor's sequence from the combined anchors.faa
+        seq = _extract_one_seq(anchors_faa, tag)
+        if not seq:
+            print(f"  [WARN] no sequence for {tag} in {anchors_faa}")
+            continue
+        # Compare, not just exist: an edited anchor keeps its name
+        wanted = f">{tag}|{role}\n{seq}\n"
+        if force or not tmp.exists() or tmp.read_text() != wanted:
+            if tmp.exists():
+                for stale in (work_dir / locus_id / "hits").glob(f"*__{tag}.tsv"):
+                    stale.unlink()
+                print(f"  [blast] {tag}: query changed, its cached hits dropped")
+            tmp.write_text(wanted)
         anchor_fastas[tag] = tmp
 
     # Build task list (skip if cache exists)

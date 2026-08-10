@@ -384,18 +384,14 @@ def main():
             cpu=args.cpu, force=args.force,
         )
     else:
-        # Load cached TSVs
-        from blast import _hit_csv_path, _load_csv
+        # Load cached TSVs on demand (holding every genome's is costly)
+        from blast import anchor_hits_on_disk
         anchors = locus_cfg["_auto"]["anchors"]
         tags    = [a["locus_tag"] for a in anchors]
-        blast_hits = {}
-        for acc in db_map:
-            blast_hits[acc] = {}
-            for tag in tags:
-                blast_hits[acc][tag] = _load_csv(
-                    _hit_csv_path(locus_work.parent, locus_id, acc, tag)
-                )
-        print(f"[run] Step 3: loaded cached blast hits for {len(db_map)} genomes")
+        blast_hits = anchor_hits_on_disk(locus_work.parent, locus_id,
+                                         list(db_map), tags)
+        print(f"[run] Step 3: using cached blast hits for {len(db_map)} genomes "
+              f"(read on demand)")
 
     # ── Step 3b: cluster blastn 
     cluster_hits: dict = {}
@@ -412,16 +408,13 @@ def main():
             print("[run] Step 3b: no _cluster_fna in config; "
                   "skipping cluster blastn (run build_config first)")
     else:
-        # Load cached cluster blastn TSVs
-        from blast import _load_csv as _lcv
+        # Load cached cluster blastn TSVs on demand
+        from blast import cluster_hits_on_disk
         cb_dir = locus_work / "cluster_blast"
         if cb_dir.exists():
-            for acc in db_map:
-                tsv = cb_dir / f"{acc}.tsv"
-                if tsv.exists():
-                    cluster_hits[acc] = _lcv(tsv)
-            print(f"[run] Step 3b: loaded cached cluster blastn hits "
-                  f"for {len(cluster_hits)} genomes")
+            cluster_hits = cluster_hits_on_disk(locus_work, list(db_map))
+            print(f"[run] Step 3b: using cached cluster blastn hits "
+                  f"for {len(cluster_hits)} genomes (read on demand)")
         else:
             print("[run] Step 3b: no cached cluster blastn found; "
                   "ruler will use gene-level fallback")

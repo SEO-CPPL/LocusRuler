@@ -219,9 +219,29 @@ def _piece_span(piece: dict) -> tuple[str, int, int]:
     return str(piece.get("contig") or ""), min(lo, hi), max(lo, hi)
 
 
+# Fragmentation calls that mean the assembly broke the locus, not the genome
+_ASSEMBLY_SPLITS = {"ASSEMBLY_SPLIT_CANDIDATE", "DIVERGENT_FRAGMENTED"}
+
+
+def _query_span(piece: dict) -> tuple[int, int]:
+    lo = _integer(piece.get("q_start"))
+    hi = _integer(piece.get("q_end"))
+    return min(lo, hi), max(lo, hi)
+
+
+def _complementary(a: dict, b: dict) -> bool:
+    """Do two pieces cover different stretches of the reference?"""
+    a_lo, a_hi = _query_span(a)
+    b_lo, b_hi = _query_span(b)
+    if a_hi <= a_lo or b_hi <= b_lo:
+        return False
+    return min(a_hi, b_hi) <= max(a_lo, b_lo)
+
+
 def _colocated_pieces(
     pieces: dict[str, dict],
     max_span_bp: int,
+    fragmentation_type: str = "",
 ) -> tuple[dict[str, dict], list[str]]:
     """Split accepted pieces into cassette-colocated and off-locus."""
     if len(pieces) <= 1:
@@ -234,6 +254,7 @@ def _colocated_pieces(
     body = pieces[body_idx]
     b_contig, b_lo, b_hi = _piece_span(body)
     b_edge = str(body.get("contig_edge_proximal") or "").strip().upper() == "Y"
+    assembly_split = str(fragmentation_type).strip().upper() in _ASSEMBLY_SPLITS
 
     kept: dict[str, dict] = {body_idx: body}
     dropped: list[str] = []
@@ -248,6 +269,11 @@ def _colocated_pieces(
                 kept[idx] = piece
                 continue
         elif b_edge and p_edge:
+            kept[idx] = piece
+            continue
+        # An assembly break can leave the halves mid-contig, so the edge test
+        # misses them; complementary reference spans identify the same locus
+        elif assembly_split and _complementary(body, piece):
             kept[idx] = piece
             continue
         dropped.append(idx)
@@ -1009,6 +1035,8 @@ def run_cassette_structure(
         )
     piece_rows = _read_csv(find_output(locus_out, "pieces.csv"))
     pieces_by_genome = _accepted_pieces(piece_rows, locus_id)
+    frag_by_genome = {row["genome_acc"]: row.get("fragmentation_type", "")
+                      for row in genome_rows}
     diagnostics_by_genome: dict[str, list[dict]] = defaultdict(list)
     for row in diagnostic_rows:
         diagnostics_by_genome[row["genome_acc"]].append(row)
@@ -1017,7 +1045,8 @@ def run_cassette_structure(
     wanted: dict[str, tuple[str, int, int, int, int]] = {}
     for accession, rows in diagnostics_by_genome.items():
         pieces_here, _ = _colocated_pieces(
-            pieces_by_genome.get(accession, {}), cassette_span_bp)
+            pieces_by_genome.get(accession, {}), cassette_span_bp,
+            frag_by_genome.get(accession, ""))
         span = extend_to_flanks(rows, pieces_here, reference_bp)
         if span is not None:
             wanted[accession] = span
@@ -1032,7 +1061,8 @@ def run_cassette_structure(
     for genome in genome_rows:
         accession = genome["genome_acc"]
         pieces, offlocus_pieces = _colocated_pieces(
-            pieces_by_genome.get(accession, {}), cassette_span_bp)
+            pieces_by_genome.get(accession, {}), cassette_span_bp,
+            genome.get("fragmentation_type", ""))
         ordered = _ordered_genes(diagnostics_by_genome.get(accession, []), pieces)
 
         span_genes = interval_by_genome.get(accession)

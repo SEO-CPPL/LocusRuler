@@ -182,6 +182,21 @@ def resolve_target_name(settings: dict, target_arg: str | None,
              f"(have: {', '.join(names)})")
 
 
+def _readable_count(directory: Path) -> tuple[int, int]:
+    """Entries that open, and entries that do not (dangling links)."""
+    ok = dead = 0
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return 0, 0
+    for entry in entries:
+        if entry.exists():
+            ok += 1
+        else:
+            dead += 1
+    return ok, dead
+
+
 def missing_target_files(target: dict) -> list[tuple[str, str, str]]:
     """The pieces a target is missing, without exiting."""
     missing = []
@@ -194,6 +209,19 @@ def missing_target_files(target: dict) -> list[tuple[str, str, str]]:
         path = Path(value)
         if not path.exists():
             missing.append((key, kind, str(path)))
+            continue
+        if kind == "directory":
+            ok, dead = _readable_count(path)
+            if ok == 0:
+                missing.append((
+                    key, kind,
+                    f"{path}  (empty"
+                    + (f"; {dead} entries point at files that are gone)" if dead
+                       else ")")))
+            elif dead:
+                print(f"[config] WARNING: {key} {path}: {dead} of {ok + dead} "
+                      f"entries point at files that are gone; those genomes "
+                      f"will be read as having no content")
     return missing
 
 
