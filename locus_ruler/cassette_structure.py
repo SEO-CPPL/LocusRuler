@@ -19,11 +19,13 @@ if str(_PKG_DIR) not in sys.path:
     sys.path.insert(0, str(_PKG_DIR))
 
 from flank_interval import (
+    contig_lengths,
     describe as describe_intervals,
     extend_to_flanks,
     genes_in_span,
     augment as augment_with_span,
     orient,
+    reach_rescued,
     reference_rank,
 )
 from locus_scale import (
@@ -219,8 +221,8 @@ def _piece_span(piece: dict) -> tuple[str, int, int]:
     return str(piece.get("contig") or ""), min(lo, hi), max(lo, hi)
 
 
-# Fragmentation calls that mean the assembly broke the locus, not the genome
-_ASSEMBLY_SPLITS = {"ASSEMBLY_SPLIT_CANDIDATE", "DIVERGENT_FRAGMENTED"}
+# A share of the piece, not of the reference, so gene and locus size do not matter
+MIN_NEW_REFERENCE_SHARE = 0.5
 
 
 def _query_span(piece: dict) -> tuple[int, int]:
@@ -229,19 +231,29 @@ def _query_span(piece: dict) -> tuple[int, int]:
     return min(lo, hi), max(lo, hi)
 
 
-def _complementary(a: dict, b: dict) -> bool:
-    """Do two pieces cover different stretches of the reference?"""
-    a_lo, a_hi = _query_span(a)
-    b_lo, b_hi = _query_span(b)
-    if a_hi <= a_lo or b_hi <= b_lo:
-        return False
-    return min(a_hi, b_hi) <= max(a_lo, b_lo)
+def _merge_spans(spans) -> list[list[int]]:
+    """Union of reference intervals, as sorted non-overlapping pairs."""
+    merged: list[list[int]] = []
+    for lo, hi in sorted((int(a), int(b)) for a, b in spans):
+        if merged and lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return merged
+
+
+def _unclaimed_bp(claimed: list[list[int]], lo: int, hi: int) -> int:
+    """Reference between lo and hi that no kept piece covers yet."""
+    total = hi - lo
+    for c_lo, c_hi in claimed:
+        total -= max(0, min(hi, c_hi) - max(lo, c_lo))
+    return max(0, total)
 
 
 def _colocated_pieces(
     pieces: dict[str, dict],
     max_span_bp: int,
-    fragmentation_type: str = "",
+    min_new_share: float = MIN_NEW_REFERENCE_SHARE,
 ) -> tuple[dict[str, dict], list[str]]:
     """Split accepted pieces into cassette-colocated and off-locus."""
     if len(pieces) <= 1:
@@ -253,34 +265,114 @@ def _colocated_pieces(
     body_idx = max(pieces, key=lambda i: _cover(pieces[i]))
     body = pieces[body_idx]
     b_contig, b_lo, b_hi = _piece_span(body)
-    b_edge = str(body.get("contig_edge_proximal") or "").strip().upper() == "Y"
-    assembly_split = str(fragmentation_type).strip().upper() in _ASSEMBLY_SPLITS
 
     kept: dict[str, dict] = {body_idx: body}
     dropped: list[str] = []
+    claimed = _merge_spans([_query_span(body)])
+
+    near: list[tuple[str, dict]] = []
+    remote: list[tuple[str, dict]] = []
     for idx, piece in pieces.items():
         if idx == body_idx:
             continue
-        p_contig, p_lo, p_hi = _piece_span(piece)
-        p_edge = str(piece.get("contig_edge_proximal") or "").strip().upper() == "Y"
-        if p_contig and p_contig == b_contig:
-            gap = max(p_lo - b_hi, b_lo - p_hi, 0)
-            if gap <= max_span_bp:
-                kept[idx] = piece
-                continue
-        elif b_edge and p_edge:
+        p_contig = _piece_span(piece)[0]
+        (near if p_contig and p_contig == b_contig else remote).append((idx, piece))
+
+    for idx, piece in near:
+        _, p_lo, p_hi = _piece_span(piece)
+        if max(p_lo - b_hi, b_lo - p_hi, 0) <= max_span_bp:
             kept[idx] = piece
-            continue
-        # An assembly break can leave the halves mid-contig, so the edge test
-        # misses them; complementary reference spans identify the same locus
-        elif assembly_split and _complementary(body, piece):
+            claimed = _merge_spans(claimed + [_query_span(piece)])
+        else:
+            dropped.append(idx)
+
+    # Proximity cannot reach across a contig break, so new reference decides instead
+    remote.sort(key=lambda item: -_unclaimed_bp(claimed, *_query_span(item[1])))
+    for idx, piece in remote:
+        q_lo, q_hi = _query_span(piece)
+        extent = q_hi - q_lo
+        if extent > 0 and _unclaimed_bp(claimed, q_lo, q_hi) / extent >= min_new_share:
             kept[idx] = piece
-            continue
-        dropped.append(idx)
+            claimed = _merge_spans(claimed + [(q_lo, q_hi)])
+        else:
+            dropped.append(idx)
     return kept, dropped
 
 
-def _renumber(genes: list[dict], ref_rank: dict[str, int]) -> list[dict]:
+def _named_within(
+    names: dict[str, dict],
+    bounds,
+    already: set,
+    wrap_len: int = 0,
+    reach_bp: int = 0,
+) -> list[dict]:
+    """Named genes inside the span that the span query could not return.
+
+    A pseudogene carries no protein row, so it is invisible to the coordinate
+    lookup even though the ruler placed and named it. On a closed chromosome
+    the span may also run past the origin, where the two halves of one locus
+    sit at opposite ends of the coordinates; wrap_len allows that crossing.
+    """
+    if not bounds:
+        return []
+    contig, lo, hi = bounds[0], bounds[1], bounds[2]
+    found = []
+    for locus_tag, gene in names.items():
+        if locus_tag in already or gene.get("gene_contig") != contig:
+            continue
+        g_lo, g_hi = _integer(gene.get("gene_start")), _integer(gene.get("gene_end"))
+        if g_hi > lo and g_lo < hi:
+            found.append(dict(gene))
+        elif wrap_len and reach_bp and min((g_lo - hi) % wrap_len,
+                                           (lo - g_hi) % wrap_len) <= reach_bp:
+            found.append(dict(gene))
+    return found
+
+
+def _boundary_families(anchors: list[dict]) -> tuple[str, str]:
+    """The families naming the two ends of the reference cluster."""
+    ends: dict[str, str] = {}
+    for anchor in anchors:
+        role = anchor.get("role")
+        if role in ("cluster_L", "cluster_R"):
+            ends[role] = (anchor.get("family") or anchor.get("locus_tag") or "").strip()
+    return ends.get("cluster_L", ""), ends.get("cluster_R", "")
+
+
+def _genes_between(members: list[dict], left: str, right: str) -> str:
+    """Genes carried between the two boundary anchors, blank if an end is missing.
+
+    Reads the cassette as assembled, so a locus split over contigs still counts,
+    but whatever the break swallowed cannot be seen: with more than one accepted
+    piece the number is a floor, not a total.
+    """
+    if not left or not right:
+        return ""
+    tokens = [_family_token(gene) for gene in members]
+    if left not in tokens or right not in tokens:
+        return ""
+    return str(max(0, abs(tokens.index(right) - tokens.index(left)) - 1))
+
+
+def _rotation_origin(positions: list[int], wrap_len: int) -> int:
+    """Where a locus that runs past the origin actually begins.
+
+    The widest gap between neighbouring genes is the stretch of chromosome the
+    locus does not occupy, so the gene after it starts the locus. On one that
+    never crosses the origin this lands on the first gene and changes nothing.
+    """
+    ordered = sorted(set(positions))
+    if not ordered:
+        return 0
+    widest, origin = (ordered[0] + wrap_len) - ordered[-1], ordered[0]
+    for lower, upper in zip(ordered, ordered[1:]):
+        if upper - lower > widest:
+            widest, origin = upper - lower, upper
+    return origin
+
+
+def _renumber(genes: list[dict], ref_rank: dict[str, int],
+              wrap_len: int = 0) -> list[dict]:
     """Renumber after the extension added rows, keeping flanks on the outside."""
     left = [g for g in genes if g.get("zone") == "flank_left"]
     right = [g for g in genes if g.get("zone") == "flank_right"]
@@ -292,10 +384,18 @@ def _renumber(genes: list[dict], ref_rank: dict[str, int]) -> list[dict]:
         except (TypeError, ValueError):
             return 0
 
+    key = _start
+    if wrap_len:
+        # Reading from the locus's own start turns the origin jump back into one run
+        origin = _rotation_origin([_start(gene) for gene in genes], wrap_len)
+        def key(gene):                                   # noqa: E306
+            return (_start(gene) - origin) % wrap_len
+        middle = sorted(middle, key=key)
+
     ordered: list[dict] = []
-    for gene in (sorted(left, key=_start)
+    for gene in (sorted(left, key=key)
                  + orient(middle, ref_rank)
-                 + sorted(right, key=_start)):
+                 + sorted(right, key=key)):
         gene = dict(gene)
         member = gene.get("zone") == MEMBER_ZONE
         gene["structure_order"] = len(ordered) + 1
@@ -1035,23 +1135,60 @@ def run_cassette_structure(
         )
     piece_rows = _read_csv(find_output(locus_out, "pieces.csv"))
     pieces_by_genome = _accepted_pieces(piece_rows, locus_id)
-    frag_by_genome = {row["genome_acc"]: row.get("fragmentation_type", "")
-                      for row in genome_rows}
     diagnostics_by_genome: dict[str, list[dict]] = defaultdict(list)
     for row in diagnostic_rows:
         diagnostics_by_genome[row["genome_acc"]].append(row)
+
+    # Named genes with coordinates, since a pseudogene has no protein row to look up
+    named_genes: dict[str, dict[str, dict]] = defaultdict(dict)
+    for row in diagnostic_rows:
+        family = (row.get("family") or "").strip()
+        locus_tag = (row.get("locus_tag") or "").strip()
+        if family and locus_tag and family != "unassigned":
+            named_genes[row["genome_acc"]].setdefault(locus_tag, {
+                "locus_tag": locus_tag,
+                "family": family,
+                "state": row.get("state", ""),
+                "gene_contig": row.get("gene_contig", ""),
+                "gene_start": row.get("gene_start", ""),
+                "gene_end": row.get("gene_end", ""),
+                "strand": row.get("strand", ""),
+                "product": row.get("product", ""),
+            })
+
+    # Domain-rescued genes have no piece to sit in, so they are folded in by hand
+    rescued_by_genome: dict[str, list[dict]] = defaultdict(list)
+    _rescue_path = find_output(locus_out, "domain_recovery_diagnostics.csv")
+    for row in (_read_csv(_rescue_path) if _rescue_path.exists() else []):
+        rescued_by_genome[row["genome_acc"]].append({
+            "locus_tag": row.get("locus_tag", ""),
+            "gene_contig": row.get("contig", ""),
+            "gene_start": row.get("start", ""),
+            "gene_end": row.get("end", ""),
+            "product": row.get("final_class", ""),
+            "family": row.get("family", ""),
+            "state": row.get("state", ""),
+        })
 
     # Bound the cassette by its flanks, falling back to accepted pieces.
     wanted: dict[str, tuple[str, int, int, int, int]] = {}
     for accession, rows in diagnostics_by_genome.items():
         pieces_here, _ = _colocated_pieces(
-            pieces_by_genome.get(accession, {}), cassette_span_bp,
-            frag_by_genome.get(accession, ""))
+            pieces_by_genome.get(accession, {}), cassette_span_bp)
         span = extend_to_flanks(rows, pieces_here, reference_bp)
         if span is not None:
-            wanted[accession] = span
+            wanted[accession] = reach_rescued(
+                span, rescued_by_genome.get(accession), reference_bp)
     interval_by_genome = genes_in_span(Path(target_cfg["db"]), wanted)
+    # Only a finished chromosome may be read as circular, never a draft contig's ends
+    closed = {row["genome_acc"] for row in genome_rows
+              if (row.get("assembly_level") or "").strip().lower()
+              in ("complete genome", "chromosome")}
+    wrap_by_genome = contig_lengths(
+        Path(target_cfg["db"]),
+        {acc: span[0] for acc, span in wanted.items() if acc in closed})
     ref_rank = reference_rank(locus_cfg.get("_auto", {}).get("anchors", []))
+    left_end, right_end = _boundary_families(locus_cfg.get("_auto", {}).get("anchors", []))
     print("[cassette] reach - "
           + describe_intervals(wanted, len(genome_rows), reference_bp))
 
@@ -1061,14 +1198,34 @@ def run_cassette_structure(
     for genome in genome_rows:
         accession = genome["genome_acc"]
         pieces, offlocus_pieces = _colocated_pieces(
-            pieces_by_genome.get(accession, {}), cassette_span_bp,
-            genome.get("fragmentation_type", ""))
+            pieces_by_genome.get(accession, {}), cassette_span_bp)
         ordered = _ordered_genes(diagnostics_by_genome.get(accession, []), pieces)
 
         span_genes = interval_by_genome.get(accession)
+        rescued_genes = rescued_by_genome.get(accession)
+        names = named_genes.get(accession, {})
         if span_genes:
+            # Renaming a gene already placed would pull a flank into the cassette
+            placed = {gene.get("locus_tag") for gene in ordered}
+            span_genes = [
+                gene if gene.get("locus_tag") in placed
+                else {**gene, **names.get(gene.get("locus_tag"), {})}
+                for gene in span_genes
+            ]
+            span_genes = span_genes + _named_within(
+                names, wanted.get(accession),
+                placed | {gene.get("locus_tag") for gene in span_genes},
+                wrap_len=wrap_by_genome.get(accession, 0),
+                reach_bp=reference_bp)
             # A union: the extension may only add.
-            ordered = _renumber(augment_with_span(ordered, span_genes), ref_rank)
+            ordered = augment_with_span(ordered, span_genes)
+        if rescued_genes:
+            # Same union, but these carry their own family and state
+            ordered = augment_with_span(ordered, rescued_genes,
+                                        membership_source="domain_rescue")
+        if span_genes or rescued_genes:
+            ordered = _renumber(ordered, ref_rank,
+                                wrap_by_genome.get(accession, 0))
         ordered_by_genome[accession] = ordered
         members = [gene for gene in ordered if gene["is_cassette_member"] == "Y"]
         structure, annotation, state, assembly = _signatures(ordered)
@@ -1104,6 +1261,7 @@ def run_cassette_structure(
             "n_accepted_pieces": len(pieces),
             "n_offlocus_pieces": len(offlocus_pieces),
             "n_cassette_genes": len(members),
+            "n_genes_between_ends": _genes_between(members, left_end, right_end),
             "n_assigned_genes": sum(_family_token(gene) != "unassigned" for gene in members),
             "n_unassigned_genes": sum(_family_token(gene) == "unassigned" for gene in members),
             "families_present": ";".join(families),

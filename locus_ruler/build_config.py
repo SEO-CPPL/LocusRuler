@@ -15,7 +15,7 @@ from domain_recovery import pfam_tokens
 from locus_status import VALID_STATUS_ROLES, normalize_status_role
 
 
-def check_anchors_csv(path: Path) -> list[str]:
+def check_anchors_csv(path: Path, settings: dict | None = None) -> list[str]:
     """Problems that would make an edited anchor table quietly do nothing."""
     try:
         with open(path, newline="", encoding="utf-8") as handle:
@@ -60,6 +60,17 @@ def check_anchors_csv(path: Path) -> list[str]:
             problems.append(
                 f"line {number}: pfam_split is TRUE but pfam is empty, "
                 "so there is nothing to split")
+
+    if settings is not None and any((row.get("pfam") or "").strip() for row in rows):
+        dom_cfg = settings.get("domain_recovery", {})
+        if not dom_cfg.get("enabled", True):
+            problems.append(
+                "pfam is set on one or more rows, but [domain_recovery] "
+                "enabled = false in settings; Pfam rescue will not run")
+        elif not dom_cfg.get("pfam_a_hmm") and not dom_cfg.get("hmm_files"):
+            problems.append(
+                "pfam is set on one or more rows, but no pfam_a_hmm or "
+                "hmm_files is configured; Pfam rescue has nothing to search")
     return problems
 
 

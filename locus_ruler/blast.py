@@ -451,6 +451,16 @@ def run_cluster_blastn(
     out_dir = (locus_dir if locus_dir is not None else work_dir / locus_id) / "cluster_blast"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # One query for the whole cache, so a changed query drops every cached hit
+    sentinel = out_dir / "_query.fna"
+    wanted = Path(cluster_fna).read_text()
+    if force or not sentinel.exists() or sentinel.read_text() != wanted:
+        if sentinel.exists():
+            for stale in out_dir.glob("*.tsv"):
+                stale.unlink()
+            print(f"  [blast] cluster query changed, its cached hits dropped")
+        sentinel.write_text(wanted)
+
     tasks = []
     for acc, db_prefix in db_map.items():
         out = out_dir / f"{acc}.tsv"

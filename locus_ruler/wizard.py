@@ -867,7 +867,7 @@ _CURATE_OPTIONS = [
 ]
 
 
-def _curate_then_run(config: Path, base: list[str], db: Path) -> int:
+def _curate_then_run(config: Path, base: list[str], db: Path, settings: dict) -> int:
     """Set as much or as little as wanted, then run -- looping, not linear."""
     code, anchors = _build_anchors(config, base)
     if anchors is None:
@@ -895,7 +895,7 @@ def _curate_then_run(config: Path, base: list[str], db: Path) -> int:
         elif choice == 4:
             _curate_pfam(anchors)
         elif choice == run_choice:
-            problems = check_anchors_csv(anchors)
+            problems = check_anchors_csv(anchors, settings)
             if problems:
                 print(paint("\nThat would not do what you meant:", "yellow"))
                 for problem in problems[:8]:
@@ -930,7 +930,7 @@ def _step_action(state: dict, ctx: dict):
                     "yellow"))
         return subprocess.call(base)
     if choice == 2:
-        return _curate_then_run(out, base, _db_for(ctx, state["target"]))
+        return _curate_then_run(out, base, _db_for(ctx, state["target"]), ctx["settings"])
     if choice == 3:
         return _stop_at_anchors(out, base)
 

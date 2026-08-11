@@ -73,6 +73,34 @@ def extend_to_flanks(
     return contig, lo, hi, gap_left, gap_right
 
 
+def reach_rescued(
+    span: tuple[str, int, int, int, int],
+    rescued: list[dict] | None,
+    reference_bp: int,
+) -> tuple[str, int, int, int, int]:
+    """Widen the span to a domain-rescued gene lying just outside it.
+
+    The span comes from the accepted pieces, which by definition never held the
+    rescued gene, so anything between the two would otherwise go unreported.
+    The reference length caps the reach: a homolog on the far side of the
+    chromosome is a separate locus, not this cassette's edge.
+    """
+    if not rescued:
+        return span
+    contig, lo, hi, gap_left, gap_right = span
+    for gene in rescued:
+        if gene.get("gene_contig") != contig:
+            continue
+        g_lo, g_hi = _int(gene.get("gene_start")), _int(gene.get("gene_end"))
+        if g_hi <= g_lo:
+            continue
+        if 0 < lo - g_hi <= reference_bp:
+            lo = g_lo
+        elif 0 < g_lo - hi <= reference_bp:
+            hi = g_hi
+    return contig, lo, hi, gap_left, gap_right
+
+
 def genes_in_span(
     db_path: Path,
     wanted: dict[str, tuple[str, int, int, int, int]],
@@ -100,6 +128,26 @@ def genes_in_span(
                 }
                 for r in rows
             ]
+    finally:
+        con.close()
+    return out
+
+
+def contig_lengths(db_path: Path, wanted: dict[str, str]) -> dict[str, int]:
+    """Last annotated base of the named contig, per genome."""
+    out: dict[str, int] = {}
+    db_path = Path(db_path)
+    if not db_path.exists() or not wanted:
+        return out
+    con = sqlite3.connect(str(db_path))
+    try:
+        for acc, contig in wanted.items():
+            row = con.execute(
+                "SELECT MAX(end) FROM proteins WHERE genome_acc = ? AND contig = ?",
+                (acc, contig),
+            ).fetchone()
+            if row and row[0]:
+                out[acc] = int(row[0])
     finally:
         con.close()
     return out
@@ -133,22 +181,33 @@ def augment(
     ordered: list[dict],
     span_genes: list[dict],
     zone: str = "cluster",
+    membership_source: str = "flank_extended_piece",
 ) -> list[dict]:
-    """Add what the extension reached, without dropping anything already found."""
-    seen = {g.get("locus_tag") for g in ordered if g.get("locus_tag")}
+    """Add what the extension reached, without dropping anything already found.
+
+    A source row may already carry its own family/state (domain-rescued genes
+    do); those are kept instead of falling back to unassigned. A gene already
+    listed as context is promoted in place rather than skipped, so naming it
+    is what settles which zone it belongs to.
+    """
+    by_tag = {g.get("locus_tag"): g for g in ordered if g.get("locus_tag")}
     extras = []
     for gene in span_genes:
-        if gene.get("locus_tag") in seen:
-            continue
         row = dict(gene)
+        family = row.get("family") or "unassigned"
         row.update({
             "zone": zone,
-            "family": "unassigned",
-            "state": "",
-            "label": "[unassigned]",
-            "membership_source": "flank_extended_piece",
+            "family": family,
+            "state": row.get("state", ""),
+            "label": row.get("label") or f"[{family}]",
+            "membership_source": membership_source,
         })
-        extras.append(row)
+        already = by_tag.get(row.get("locus_tag"))
+        if already is None:
+            extras.append(row)
+        elif family != "unassigned":
+            already.update({k: row[k] for k in
+                            ("zone", "family", "state", "label", "membership_source")})
     if not extras:
         return ordered
 
@@ -158,11 +217,15 @@ def augment(
     result = list(ordered)
     for extra in extras:
         contig = extra.get("gene_contig")
+        here = [g for g in result if g.get("gene_contig") == contig]
+        # The list may run backwards along the contig, so follow whichever way it goes
+        descending = len(here) >= 2 and _start(here[0]) > _start(here[-1])
         target = len(result)
         for index, gene in enumerate(result):
             if gene.get("gene_contig") != contig:
                 continue
-            if _start(gene, 1 << 62) > _start(extra):
+            position = _start(gene, 0 if descending else (1 << 62))
+            if (position < _start(extra)) if descending else (position > _start(extra)):
                 target = index
                 break
         result.insert(target, extra)

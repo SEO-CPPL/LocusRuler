@@ -29,6 +29,7 @@ def step_build_config(
         extract_sequences, extract_cluster_fna,
         classify_product, assign_roles, build_round_pairs,
         write_anchors_csv, apply_existing_family_overrides,
+        read_aux_rows, resolve_aux_rows,
     )
     import sqlite3
     from datetime import datetime
@@ -129,6 +130,16 @@ def step_build_config(
 
     # Curated CSV family overrides take precedence over fresh rule-based classification.
     apply_existing_family_overrides(genes, cfg_path)
+
+    # Aux rows live only in the CSV, so read them back before write_anchors_csv drops them
+    con_aux = sqlite3.connect(tgt_cfg["db"])
+    con_aux.row_factory = sqlite3.Row
+    aux_rows_raw = read_aux_rows(cfg_path)
+    aux_genes = resolve_aux_rows(con_aux, aux_rows_raw) if aux_rows_raw else []
+    con_aux.close()
+    if aux_genes:
+        genes.extend(aux_genes)
+        print(f"[run]   added {len(aux_genes)} aux locus probe(s)")
 
     by_role = {g["role"]: g for g in genes
                if g["role"] not in ("inner", "flank_L2", "flank_R2")}
