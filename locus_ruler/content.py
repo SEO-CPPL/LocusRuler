@@ -97,6 +97,12 @@ def _make_separator_cell(label: str, contig: str, pos: int) -> dict:
     }
 
 
+def _rebuild_layout(pl: dict) -> None:
+    """Sort in_cluster to match left_n/right_n's orientation; layout is not reversed again."""
+    pl["in_cluster"].sort(key=lambda g: int(g["start"]), reverse=(pl["orientation"] < 0))
+    pl["layout"] = pl["left_n"] + pl["in_cluster"] + pl["right_n"]
+
+
 def _load_genome_meta(db_path: str, accessions: list[str]) -> dict[str, dict]:
     """Load species / strain / assembly_level for each accession from the SQLite DB."""
     if not db_path or not Path(db_path).exists():
@@ -1650,13 +1656,8 @@ def run_content(
                         "reason": reason,
                     })
 
-        # Re-sort each piece's in_cluster by coordinate and rebuild the layout, orientation-aware.
         for pl in piece_layouts:
-            pl["in_cluster"].sort(key=lambda g: int(g["start"]))
-            new_layout = pl["left_n"] + pl["in_cluster"] + pl["right_n"]
-            if pl["orientation"] < 0:
-                new_layout = list(reversed(new_layout))
-            pl["layout"] = new_layout
+            _rebuild_layout(pl)
 
         res["_piece_count"] = len(piece_layouts)
         res["_piece_layouts_meta"] = [
@@ -2245,11 +2246,7 @@ def run_content(
             if any(pl["in_cluster"] for pl in piece_layouts if pl.get("in_cluster")) or aux_display_layouts:
                 display_layouts = piece_layouts + aux_display_layouts
                 for pl in display_layouts:
-                    pl["in_cluster"].sort(key=lambda g: int(g["start"]))
-                    layout = pl["left_n"] + pl["in_cluster"] + pl["right_n"]
-                    if pl["orientation"] < 0 and not pl.get("display_only_aux"):
-                        layout = list(reversed(layout))
-                    pl["layout"] = layout
+                    _rebuild_layout(pl)
 
                 display_deduped: list[dict] = []
                 _frag_type = res.get("_fragmentation_type", "")

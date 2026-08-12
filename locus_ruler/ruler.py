@@ -854,7 +854,8 @@ def _analyze_cluster_hsps(
         pos_min, pos_max = min(positions), max(positions)
         span, primary_contig = pos_max - pos_min, pieces[0]["sseqid"]
     else:
-        pos_min, pos_max, span, primary_contig = None, None, 0, "|".join(contigs)
+        # Cross-contig span isn't a real distance; None (not 0) marks it unmeasured.
+        pos_min, pos_max, span, primary_contig = None, None, None, "|".join(contigs)
 
     if coverage < min_coverage:
         out = dict(empty_result)

@@ -233,6 +233,21 @@ def _cell_label_parts(g: dict, res: dict) -> tuple[str, bool, bool, bool, str]:
     return label, is_divergent, (dna_only or signal_word == "dna"), strong, detail
 
 
+def _loci_row_order(
+    all_locus_genes: dict[str, list[dict]],
+    genome_meta: dict[str, dict],
+) -> list[str]:
+    """Accessions grouped by which genes they carry, loci.csv and loci.xlsx alike."""
+    def signature(acc: str) -> str:
+        return ">".join(g.get("family") or "unassigned"
+                        for g in all_locus_genes[acc] if g.get("_zone") == "cluster")
+
+    def key(acc: str) -> tuple:
+        return (signature(acc), genome_meta.get(acc, {}).get("species", ""), acc)
+
+    return sorted(all_locus_genes, key=key)
+
+
 # ── loci.csv ──────────────────────────────────────────────────────
 def write_loci_csv(
     all_locus_genes: dict[str, list[dict]],
@@ -258,7 +273,7 @@ def write_loci_csv(
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
-        for acc in sorted(all_locus_genes):
+        for acc in _loci_row_order(all_locus_genes, genome_meta):
             res   = ruler_results.get(acc, {})
             meta  = genome_meta.get(acc, {})
             genes = all_locus_genes[acc]
@@ -826,7 +841,7 @@ def write_loci_xlsx(
     # Derived from fixed_headers rather than hardcoded, so reordering them keeps the tint right.
     STATUS_COL = fixed_headers.index("status") + 1
 
-    for row_idx, acc in enumerate(sorted(all_locus_genes), start=2):
+    for row_idx, acc in enumerate(_loci_row_order(all_locus_genes, genome_meta), start=2):
         res    = ruler_results.get(acc, {})
         meta   = genome_meta.get(acc, {})
         genes  = all_locus_genes[acc]
