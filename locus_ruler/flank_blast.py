@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Reverse flank-gene blastp utilities."""
 
+import hashlib
 import re
 import sqlite3
 import subprocess
 import tempfile
+from array import array
 from pathlib import Path
 from typing import Optional
 
@@ -52,20 +54,75 @@ def _product_to_flank_label(product: str) -> Optional[str]:
     return p or None
 
 
-def _make_faa_index(faa_path: str) -> dict[str, int]:
-    """Build ``{locus_tag: byte_offset_of_header}`` for a FAA file."""
-    index: dict[str, int] = {}
-    try:
-        with open(faa_path, "rb") as f:
-            pos = 0
-            for line in f:
-                if line.startswith(b">"):
-                    lt = line[1:].split()[0].decode(errors="replace")
-                    index[lt] = pos
-                pos += len(line)
-    except Exception as e:
-        print(f"[flank_blast] WARN: could not index FAA {faa_path}: {e}")
-    return index
+class FaaIndex:
+    """``{locus_tag: byte_offset_of_header}`` as two int64 arrays, 16 bytes a protein, because the dict is ~7 GB at 46M."""
+
+    def __init__(self, faa_path: str):
+        self.faa_path = faa_path
+        self._hashes = array("q")
+        self._offsets = array("q")
+        self._build()
+
+    @staticmethod
+    def _hash(tag: str) -> int:
+        digest = hashlib.blake2b(tag.encode(), digest_size=8).digest()
+        return int.from_bytes(digest, "big", signed=True)
+
+    def _build(self) -> None:
+        # array('q') keeps the scan at 8 bytes per protein; a list of tuples
+        # here would cost more than the dict this class exists to replace.
+        try:
+            with open(self.faa_path, "rb") as f:
+                pos = 0
+                for line in f:
+                    if line.startswith(b">"):
+                        lt = line[1:].split()[0].decode(errors="replace")
+                        self._hashes.append(self._hash(lt))
+                        self._offsets.append(pos)
+                    pos += len(line)
+        except Exception as e:
+            print(f"[flank_blast] WARN: could not index FAA {self.faa_path}: {e}")
+            return
+
+        import numpy as np
+
+        hashes = np.frombuffer(self._hashes, dtype=np.int64)
+        offsets = np.frombuffer(self._offsets, dtype=np.int64)
+        order = np.argsort(hashes, kind="stable")
+        self._hashes, self._offsets = hashes[order], offsets[order]
+
+    def _tag_at(self, offset: int) -> Optional[str]:
+        with open(self.faa_path, "rb") as f:
+            f.seek(offset)
+            header = f.readline()
+        if not header.startswith(b">"):
+            return None
+        return header[1:].split()[0].decode(errors="replace")
+
+    def get(self, tag: str, default=None):
+        """The offset whose header really is *tag*, checking every hash match."""
+        if not len(self._hashes):
+            return default
+        import numpy as np
+
+        target = self._hash(tag)
+        i = int(np.searchsorted(self._hashes, target, side="left"))
+        while i < len(self._hashes) and int(self._hashes[i]) == target:
+            offset = int(self._offsets[i])
+            if self._tag_at(offset) == tag:
+                return offset
+            i += 1
+        return default
+
+    def __len__(self) -> int:
+        return len(self._hashes)
+
+    def __bool__(self) -> bool:
+        return len(self._hashes) > 0
+
+
+def _make_faa_index(faa_path: str) -> "FaaIndex":
+    return FaaIndex(faa_path)
 
 
 def _get_seq_from_faa(faa_path: str, locus_tag: str,

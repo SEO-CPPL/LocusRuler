@@ -12,6 +12,12 @@ from duplication import (
     _load_ruler_genome_meta,
 )
 from hsp_filter import cap_family_hsps as _cap_family_hsps
+from results_store import (
+    HeavyStore,
+    ResultsView,
+    dump_results_json,
+    split_heavy,
+)
 from weak_hsp_rescue import attach_domain_guided_weak_hsps
 
 # ── Status constants ──────────────────────────────────────────────────────
@@ -1020,7 +1026,7 @@ def _assess_genome(accession, hits, locus_cfg, settings, cluster_hsps=None,
     return _combine(accession, flank, blast, anchors, exp_bp)
 
 
-def run_ruler(locus_cfg, settings, db_map, blast_hits, work_dir, cluster_hits=None, cpu=4, force=False, no_split_search=False, target_name: str = "", locus_dir: "Path | None" = None):
+def run_ruler(locus_cfg, settings, db_map, blast_hits, work_dir, cluster_hits=None, cpu=4, force=False, no_split_search=False, target_name: str = "", locus_dir: "Path | None" = None, batch_size: int = 1000):
     locus_id = locus_cfg["locus_id"]
     tgt_name   = target_name or locus_cfg.get("reference", {}).get("target", "")
     tgt_cfg_ws = next((t for t in settings.get("targets", []) if t["name"] == tgt_name), None)
@@ -1029,22 +1035,38 @@ def run_ruler(locus_cfg, settings, db_map, blast_hits, work_dir, cluster_hits=No
         list(db_map.keys()),
     )
 
-    results = {
-        acc: _assess_genome(
-            acc, blast_hits.get(acc, {}), locus_cfg, settings,
-            cluster_hits.get(acc, []) if cluster_hits is not None else None,
-            genome_meta=genome_meta_ws.get(acc, {}),
-        )
-        for acc in db_map
-    }
-    _verify_duplications(results, locus_cfg, settings, target_name=target_name)
-
     _locus_dir = locus_dir if locus_dir is not None else work_dir / locus_id
     _locus_dir.mkdir(parents=True, exist_ok=True)
-    with open(_locus_dir / "ruler_results.json", "w") as f: json.dump(results, f, indent=2, default=str)
+    store = HeavyStore(_locus_dir / "ruler_results.jsonl").open_for_write()
+
+    accessions = list(db_map)
+    results: dict[str, dict] = {}
+    for start in range(0, len(accessions), batch_size):
+        batch = {
+            acc: _assess_genome(
+                acc, blast_hits.get(acc, {}), locus_cfg, settings,
+                cluster_hits.get(acc, []) if cluster_hits is not None else None,
+                genome_meta=genome_meta_ws.get(acc, {}),
+            )
+            for acc in accessions[start:start + batch_size]
+        }
+        # Duplication checks compare a genome's pieces only against its own, so
+        # a batch is as complete a view as the whole run.
+        _verify_duplications(batch, locus_cfg, settings, target_name=target_name)
+        for acc, res in batch.items():
+            light, heavy = split_heavy(res)
+            store.append(acc, heavy)
+            results[acc] = light
+        if len(accessions) > batch_size:
+            print(f"[ruler] {min(start + batch_size, len(accessions)):,} / "
+                  f"{len(accessions):,} genomes assessed")
+    store.close_write()
+
+    write_light_results(results, _locus_dir / "ruler_results_light.json")
+    dump_results_json(results, store, _locus_dir / "ruler_results.json")
     write_summary(results, locus_cfg, _locus_dir / "genome_summary.csv",
                   genome_meta=genome_meta_ws)
-    return results
+    return results, store
 
 def write_summary(results, locus_cfg, out_path, genome_meta=None):
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1107,7 +1129,31 @@ def write_summary(results, locus_cfg, out_path, genome_meta=None):
             })
 
 def load_ruler_results(locus_dir: "Path"):
-    """Load ruler_results.json from *locus_dir*."""
+    """Load a cached Step 4 run as (light results, heavy-field store)."""
     from pathlib import Path as _Path
-    with open(_Path(locus_dir) / "ruler_results.json") as f:
-        return json.load(f)
+    locus_dir = _Path(locus_dir)
+    store = HeavyStore(locus_dir / "ruler_results.jsonl")
+    light_path = locus_dir / "ruler_results_light.json"
+
+    if light_path.exists() and store.path.exists():
+        with open(light_path) as f:
+            return json.load(f), store.load_index()
+
+    # A cache from before results moved to disk: split it into the two files.
+    with open(locus_dir / "ruler_results.json") as f:
+        full = json.load(f)
+    store.open_for_write()
+    results = {}
+    for acc in sorted(full):
+        light, heavy = split_heavy(full[acc])
+        store.append(acc, heavy)
+        results[acc] = light
+    store.close_write()
+    write_light_results(results, light_path)
+    return results, store
+
+
+def write_light_results(results: dict, out_path: "Path") -> None:
+    """Persist the non-HSP fields, which is all a `--from 5` resume needs."""
+    with open(out_path, "w") as f:
+        json.dump(results, f, default=str)

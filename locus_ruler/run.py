@@ -4,6 +4,7 @@
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 # Support both `python locus_ruler/run.py` and `python -m locus_ruler.run`, keeping
@@ -235,6 +236,31 @@ def step_build_config(
     return locus_cfg
 
 
+# Past this many genomes the heatmap needs more memory than the rest of the
+# run put together, and its rows are far too many to read anyway.
+HEATMAP_MAX_GENOMES = 2000
+
+# ── Step timing ───────────────────────────────────────────────
+_STEP_MARKS: list[tuple[str, float]] = []
+
+
+def _mark(label: str) -> None:
+    """Record when a step began, for the timing summary at the end of a run."""
+    _STEP_MARKS.append((label, time.time()))
+
+
+def _print_step_times() -> None:
+    if len(_STEP_MARKS) < 2:
+        return
+    print("\n[run] ── Step times ──────────────────────────────────────────")
+    for (label, start), (_, end) in zip(_STEP_MARKS, _STEP_MARKS[1:]):
+        mins, secs = divmod(end - start, 60)
+        print(f"        {label:34s} {int(mins):3d}m {secs:04.1f}s")
+    total = _STEP_MARKS[-1][1] - _STEP_MARKS[0][1]
+    mins, secs = divmod(total, 60)
+    print(f"        {'TOTAL':34s} {int(mins):3d}m {secs:04.1f}s")
+
+
 # ── Main ──────────────────────────────────────────────────────
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
@@ -253,6 +279,9 @@ def parse_args() -> argparse.Namespace:
                          "given, you are asked")
     ap.add_argument("--cpu",     type=int, default=4,
                     help="Parallel workers for BLAST jobs (default: 4)")
+    ap.add_argument("--batch-size", type=int, default=1000, metavar="N",
+                    help="Genomes assessed per batch in step 4 (default: 1000). "
+                         "Lower it if memory is tight on a very large target.")
     ap.add_argument("--from",    dest="from_step", type=int, default=1,
                     metavar="STEP",
                     help="Resume from step N (1=build_config … 6=cassette structure)")
@@ -276,6 +305,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--no-heatmap", dest="heatmap", action="store_false",
                     help="Skip cluster_heatmap.png (render it later with "
                          "locus-ruler-heatmap)")
+    ap.add_argument("--heatmap", dest="heatmap_forced", action="store_true",
+                    help=f"Render the heatmap even past the {HEATMAP_MAX_GENOMES:,}-genome "
+                         "size where it is skipped by default")
     ap.add_argument("--no-report", dest="report", action="store_false",
                     help="Skip locus_report.xlsx (build it later with "
                          "locus-ruler-report)")
@@ -345,6 +377,7 @@ def main():
 
     tools = settings.get("tools", {})
     if args.from_step <= 2:
+        _mark("2 blast databases")
         print("[run] Step 2: building BLAST databases …")
         db_map = make_dbs(
             tgt_cfg, work_dir, cpu=args.cpu,
@@ -389,6 +422,7 @@ def main():
 
     # ── Step 3: anchor BLAST 
     if args.from_step <= 3:
+        _mark("3 anchor tblastn")
         print("[run] Step 3: running anchor tblastn …")
         blast_hits = run_anchor_blast(
             locus_cfg, settings, db_map, locus_work.parent,
@@ -436,8 +470,9 @@ def main():
 
     # ── Step 4: ruler 
     if args.from_step <= 4:
+        _mark("4 ruler")
         print("[run] Step 4: running progressive ruler …")
-        ruler_results = run_ruler(
+        ruler_results, heavy_store = run_ruler(
             locus_cfg, settings, db_map, blast_hits, work_dir,
             cluster_hits=cluster_hits if cluster_hits is not None else None,
             cpu=args.cpu,
@@ -445,10 +480,11 @@ def main():
             no_split_search=args.no_split_search,
             target_name=target_name,
             locus_dir=locus_work,
+            batch_size=args.batch_size,
         )
     else:
         print("[run] Step 4: loading cached ruler results …")
-        ruler_results = load_ruler_results(locus_work)
+        ruler_results, heavy_store = load_ruler_results(locus_work)
         # Restrict to requested genomes
         if args.genome:
             ruler_results = {args.genome: ruler_results[args.genome]}
@@ -459,13 +495,15 @@ def main():
 
     # ── Step 5: content 
     if args.from_step <= 5:
+        _mark("5 content")
         print("[run] Step 5: extracting GFF content …")
-        ruler_results = run_content(
+        ruler_results, heavy_store = run_content(
             ruler_results, locus_cfg, settings, blast_hits,
             work_dir=work_dir, output_dir=locus_out,
             target_name=target_name,
             config_dir=cfg_path.parent,
             cluster_hits=cluster_hits,
+            store=heavy_store,
         )
 
         # Refresh summary CSV with content columns filled in (genome_meta for species/strain)
@@ -494,9 +532,13 @@ def main():
                           tables_dir(locus_out) / "genome_summary.csv",
                           genome_meta=_summary_meta)
             # Refresh JSON to include _flank_validation and other content fields
-            json_path = locus_work / "ruler_results.json"
-            with open(json_path, "w") as f:
-                json.dump(ruler_results, f, indent=2, default=str)
+            from ruler import write_light_results
+            from results_store import dump_results_json
+
+            write_light_results(ruler_results,
+                                locus_work / "ruler_results_light.json")
+            dump_results_json(ruler_results, heavy_store,
+                              locus_work / "ruler_results.json")
     else:
         print("[run] Step 5: skipped (--from > 5)")
 
@@ -509,6 +551,7 @@ def main():
         print("[run] Step 6: skipped in --genome mode "
               "(complete canonical outputs are intentionally unchanged)")
     else:
+        _mark("6 cassette structure")
         print("[run] Step 6: discovering cassette structures …")
         from cassette_structure import run_cassette_structure
 
@@ -520,13 +563,23 @@ def main():
         )
 
     # ── Optional presentation layer 
-    if args.heatmap and not args.genome:
+    _too_many = (len(ruler_results) > HEATMAP_MAX_GENOMES
+                 and not args.heatmap_forced)
+    if args.heatmap and not args.genome and _too_many:
+        print(f"[run] Skipping cluster_heatmap.png: {len(ruler_results):,} genomes is "
+              f"past the {HEATMAP_MAX_GENOMES:,} the renderer handles, and every table "
+              f"is already written. Use --heatmap to render it anyway, or "
+              f"locus-ruler-heatmap later.")
+    elif args.heatmap and not args.genome:
+        _mark("heatmap")
         print("[run] Rendering cluster_heatmap.png …")
         try:
             from heatmap import render as render_heatmap
 
+            from results_store import ResultsView
+
             render_heatmap(
-                ruler_results, locus_cfg, _summary_meta,
+                ResultsView(ruler_results, heavy_store), locus_cfg, _summary_meta,
                 locus_out / "cluster_heatmap.png",
             )
         except Exception as exc:
@@ -534,6 +587,7 @@ def main():
                   f"outputs are otherwise complete. Retry with locus-ruler-heatmap.")
 
     if args.report and not args.genome:
+        _mark("report")
         print("[run] Building locus_report.xlsx …")
         try:
             from report import build_report
@@ -550,6 +604,8 @@ def main():
     for status, n in sorted(counts.items(), key=lambda x: -x[1]):
         print(f"        {status:20s} {n:4d}")
     print(f"        {'TOTAL':20s} {sum(counts.values()):4d}")
+    _mark("done")
+    _print_step_times()
     print(f"\n[run] Output → {locus_out}")
 
 

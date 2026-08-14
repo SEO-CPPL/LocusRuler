@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from gff import _find_gff, parse_gff_region
+from results_store import HeavyStore, ResultsView, stream_with_heavy
 from classify import load_rules, classify_genes
 from fragmentation import classify_fragmentation
 from flank import (
@@ -141,6 +142,7 @@ def run_content(
     target_name: str = "",
     config_dir: Path = None,
     cluster_hits: Optional[dict[str, list[dict]]] = None,
+    store: "HeavyStore | None" = None,
 ) -> dict[str, dict]:
     """Extract gene content from GFF files for every genome with a confirmed locus."""
     auto     = locus_cfg.get("_auto", {})
@@ -439,7 +441,12 @@ def run_content(
     # ── Per-genome content extraction loop
     all_locus_genes: dict[str, list[dict]] = {}
 
-    for acc, res in ruler_results.items():
+    # This pass annotates the pieces it walks, so the fields are re-saved as
+    # each genome is released and the writers below read the annotated copy.
+    enriched = HeavyStore(store.path.with_name("ruler_results.content.jsonl"))
+    enriched.open_for_write()
+
+    for acc, res in stream_with_heavy(ruler_results, store, enriched):
         piece_status = res.get("status", "UNKNOWN")
         if piece_status not in _CONTENT_STATUSES and not res.get("_pieces"):
             all_locus_genes[acc] = []
@@ -2310,6 +2317,11 @@ def run_content(
     tbl_dir = tables_dir(output_dir)
     diag_dir = diagnostics_dir(output_dir)
 
+    # The piece- and HSP-level writers below read fields the loop already
+    # dropped, so they see them through the store, one genome at a time.
+    enriched.close_write()
+    with_heavy = ResultsView(ruler_results, enriched)
+
     write_loci_csv(all_locus_genes, ruler_results, locus_cfg, genome_meta,
                    tbl_dir / "loci.csv")
     write_gene_diagnostics_csv(all_locus_genes, ruler_results, locus_cfg,
@@ -2317,7 +2329,7 @@ def run_content(
                                tgt_faa_path=tgt_faa_path,
                                tgt_faa_index=tgt_faa_index if tgt_faa_index else None,
                                fna_dir=tgt_cfg.get("fna_dir", ""))
-    write_hsp_diagnostics_csv(ruler_results, locus_cfg, genome_meta,
+    write_hsp_diagnostics_csv(with_heavy, locus_cfg, genome_meta,
                               diag_dir / "hsp_diagnostics.csv")
     write_domain_recovery_diagnostics(
         domain_recovery_rows,
@@ -2331,12 +2343,12 @@ def run_content(
         print("[content] openpyxl not installed; skipping loci.xlsx "
               "(pip install openpyxl to enable)")
 
-    write_pieces_csv(ruler_results, locus_cfg, genome_meta,
+    write_pieces_csv(with_heavy, locus_cfg, genome_meta,
                      tbl_dir / "pieces.csv")
-    write_clade_markers_tsv(ruler_results, locus_cfg, genome_meta,
+    write_clade_markers_tsv(with_heavy, locus_cfg, genome_meta,
                             tbl_dir / "clade_markers.tsv")
-    write_marker_matrix_csv(ruler_results, locus_cfg, genome_meta,
+    write_marker_matrix_csv(with_heavy, locus_cfg, genome_meta,
                             tbl_dir / "marker_matrix.csv")
     write_output_guide(output_dir / "OUTPUTS.md")
 
-    return ruler_results
+    return ruler_results, enriched

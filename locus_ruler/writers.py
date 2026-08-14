@@ -3,6 +3,7 @@
 
 import csv
 import sys
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -30,14 +31,24 @@ def _find_fna_path(fna_dir: str, acc: str) -> Optional[Path]:
     return None
 
 
+_CONTIG_CACHE_SIZE = 4
+
+
+def _evict(cache: "OrderedDict") -> None:
+    while len(cache) > _CONTIG_CACHE_SIZE:
+        cache.popitem(last=False)
+
+
 def _load_genome_contigs(fna_dir: str, acc: str,
-                         _cache: dict[str, Optional[dict[str, str]]] = {}) -> Optional[dict[str, str]]:
-    """Cache-backed loader: returns {contig_id: sequence} or None."""
+                         _cache: "OrderedDict[str, Optional[dict[str, str]]]" = OrderedDict()) -> Optional[dict[str, str]]:
+    """Returns {contig_id: sequence} or None, caching only the last few: all of them is tens of GB."""
     if acc in _cache:
+        _cache.move_to_end(acc)
         return _cache[acc]
     fna_path = _find_fna_path(fna_dir, acc)
     if fna_path is None:
         _cache[acc] = None
+        _evict(_cache)
         return None
     try:
         # Imported here to avoid a circular dependency.
@@ -49,6 +60,7 @@ def _load_genome_contigs(fna_dir: str, acc: str,
     except Exception as e:
         print(f"[writers] WARN: could not load FNA for {acc}: {e}")
         _cache[acc] = None
+    _evict(_cache)
     return _cache[acc]
 
 

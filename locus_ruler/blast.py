@@ -289,14 +289,10 @@ def run_anchor_blast(locus_cfg: dict, settings: dict,
             acc, tag, rows = fut.result()
             _save_csv(rows, _hit_csv_path(work_dir, locus_id, acc, tag))
 
-    # Collect results from cache
-    results: dict[str, dict[str, list[dict]]] = {}
-    for acc in db_map:
-        results[acc] = {}
-        for tag in anchor_fastas:
-            results[acc][tag] = _load_csv(_hit_csv_path(work_dir, locus_id, acc, tag))
-
-    return results
+    # Every hit is already on disk, so hand back the same read-on-demand view
+    # a cached run gets rather than a second copy of it all in memory.
+    return anchor_hits_on_disk(work_dir, locus_id, list(db_map),
+                               list(anchor_fastas))
 
 
 # ── 3.
@@ -448,7 +444,8 @@ def run_cluster_blastn(
     blastn      = settings.get("tools", {}).get("blastn", "blastn")
     threads     = int(blast_cfg.get("threads_per_job", 2))
 
-    out_dir = (locus_dir if locus_dir is not None else work_dir / locus_id) / "cluster_blast"
+    _locus_dir = locus_dir if locus_dir is not None else work_dir / locus_id
+    out_dir = _locus_dir / "cluster_blast"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # One query for the whole cache, so a changed query drops every cached hit
@@ -486,12 +483,8 @@ def run_cluster_blastn(
             else:
                 out.write_text("\t".join(CLUSTER_COLS) + "\n")
 
-    # Load all results from cache (including previously-cached genomes)
-    results: dict[str, list[dict]] = {}
-    for acc in db_map:
-        out = out_dir / f"{acc}.tsv"
-        results[acc] = _load_csv(out)  # reuse existing _load_csv helper
-    return results
+    # As with the anchor hits, read these back per genome instead of all at once.
+    return cluster_hits_on_disk(_locus_dir, list(db_map))
 
 
 # ── sequence helper ──────────────────────────────────────────────────────
